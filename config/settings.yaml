@@ -1,0 +1,82 @@
+# ============================================================
+# ClaudeStreet AgentSwarm Configuration
+# Serverless Event-Driven Stock Trading System
+# ============================================================
+
+swarm:
+  name: "claudestreet-alpha"
+  max_concurrent_agents: 8
+  event_bus_max_queue: 10000
+  shutdown_timeout_seconds: 30
+
+# --- Gateway routing ---
+gateway:
+  host: "127.0.0.1"
+  port: 18790
+  max_retries: 3
+  retry_delay_seconds: 2
+
+# --- Heartbeat intervals (seconds) ---
+heartbeat:
+  sentinel: 60          # check market data every minute
+  analyst: 300          # run analysis every 5 minutes
+  strategist: 900       # evolve strategies every 15 minutes
+  risk_guard: 120       # check risk exposure every 2 minutes
+  chronicler: 600       # performance snapshot every 10 minutes
+
+# --- Memory ---
+memory:
+  db_path: "./data/memory.db"
+  session_dir: "./data/sessions"
+  vector_dimensions: 256
+  max_session_lines: 5000
+
+# --- Trading universe ---
+trading:
+  watchlist:
+    - AAPL
+    - MSFT
+    - GOOG
+    - AMZN
+    - NVDA
+    - TSLA
+    - META
+    - JPM
+    - V
+    - SPY
+  max_positions: 10
+  max_position_pct: 0.15          # max 15% of portfolio per position
+  max_portfolio_risk_pct: 0.02    # max 2% portfolio risk per trade
+  stop_loss_default_pct: 0.05     # 5% default stop loss
+  take_profit_default_pct: 0.10   # 10% default take profit
+  paper_trading: true
+  initial_capital: 100000.0
+
+# --- Evolution ---
+evolution:
+  population_size: 20
+  survivors_per_generation: 5
+  mutation_rate: 0.15
+  crossover_rate: 0.6
+  generations_per_cycle: 1
+  min_trades_for_fitness: 10
+  fitness_lookback_days: 30
+
+# --- LLM ---
+llm:
+  default_provider: "anthropic"
+  default_model: "claude-sonnet-4-6"
+  max_tokens: 4096
+  temperature: 0.3
+  reasoning_model: "claude-opus-4-6"
+  fast_model: "claude-haiku-4-5-20251001"
+
+# --- Risk limits (circuit breakers) ---
+risk:
+  max_daily_loss_pct: 0.03        # halt trading after 3% daily loss
+  max_drawdown_pct: 0.10          # halt after 10% drawdown from peak
+  max_trades_per_day: 20
+  min_time_between_trades_sec: 60
+  restricted_hours:               # no trading during these windows
+    - "09:30-09:45"               # first 15min volatility
+    - "15:45-16:00"               # last 15min volatility
