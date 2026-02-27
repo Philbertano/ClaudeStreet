@@ -8,7 +8,6 @@ Thompson Sampling for strategy selection, and regime filtering.
 from __future__ import annotations
 
 import logging
-import math
 import random
 
 from claudestreet.agents.base import BaseAgent
@@ -28,7 +27,7 @@ class StrategistAgent(BaseAgent):
     def __init__(self, memory, config) -> None:
         super().__init__(memory, config)
         self._strategies: list[Strategy] | None = None
-        self._current_regime: str = ""
+        self._current_regime: str | None = None
 
     def _load_strategies(self) -> list[Strategy]:
         """Load active strategies from DynamoDB (cached per invocation)."""
@@ -82,12 +81,20 @@ class StrategistAgent(BaseAgent):
         logger.info("Seeded %d initial strategies", len(strategies))
         return strategies
 
+    def _get_current_regime(self) -> str:
+        """Load current regime from DynamoDB (cached per invocation)."""
+        if self._current_regime is None:
+            self._current_regime = self.memory.get_current_regime()
+        return self._current_regime
+
     def process(self, event: Event) -> list[Event]:
         if event.type == EventType.ANALYSIS_COMPLETE:
             return self._propose_trades(event)
         if event.type == EventType.REGIME_CHANGE:
-            self._current_regime = event.payload.get("regime", "")
-            logger.info("[strategist] Regime updated to: %s", self._current_regime)
+            regime = event.payload.get("regime", "")
+            self.memory.set_current_regime(regime)
+            self._current_regime = regime
+            logger.info("[strategist] Regime updated to: %s", regime)
             return []
         return []
 
@@ -113,7 +120,8 @@ class StrategistAgent(BaseAgent):
 
     def _filter_by_regime(self, strategies: list[Strategy]) -> list[Strategy]:
         """Filter strategies by current market regime."""
-        if not self._current_regime:
+        current_regime = self._get_current_regime()
+        if not current_regime:
             return strategies
 
         filtered = []
@@ -123,7 +131,7 @@ class StrategistAgent(BaseAgent):
                 filtered.append(s)
                 continue
             # Match regime
-            if s.regime_preference == self._current_regime:
+            if s.regime_preference == current_regime:
                 filtered.append(s)
 
         # Fallback: if no strategies match, use all

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import random
 
-from claudestreet.models.strategy import StrategyGenome, StrategyGene
+from claudestreet.models.strategy import StrategyGenome
 
 
 class Mutator:

@@ -14,7 +14,6 @@ from __future__ import annotations
 import aws_cdk as cdk
 from aws_cdk import (
     aws_ec2 as ec2,
-    aws_ecr_assets as ecr_assets,
     aws_ecs as ecs,
     aws_events as events,
     aws_events_targets as targets,
@@ -164,7 +163,7 @@ class AgentsStack(cdk.Stack):
             # Provisioned concurrency
             pc = spec.get("provisioned_concurrency", 0)
             if pc > 0:
-                alias = fn.add_alias("live",
+                fn.add_alias("live",
                     provisioned_concurrent_executions=pc,
                 )
 
@@ -505,7 +504,7 @@ class AgentsStack(cdk.Stack):
         # Build the evolution engine Docker image
         evo_image = ecs.ContainerImage.from_asset(
             directory="..",
-            file="src/claudestreet/evolve_engine/Dockerfile",
+            file="Dockerfile",
             exclude=["cdk", "cdk.out", ".git", "data", ".venv"],
         )
 

@@ -7,9 +7,7 @@ Forwards all changes for analytics pipeline.
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 
 logger = logging.getLogger(__name__)
 

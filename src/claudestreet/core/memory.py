@@ -125,31 +125,45 @@ class DynamoMemory:
     def record_trade_close(
         self, trade_id: str, exit_price: float, pnl: float
     ) -> None:
-        self._trades.update_item(
-            Key={"trade_id": trade_id},
-            UpdateExpression=(
-                "SET #s = :status, exit_price = :exit_price, "
-                "pnl = :pnl, closed_at = :closed_at"
-            ),
-            ConditionExpression=Attr("status").eq("open"),
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues=_to_decimal({
-                ":status": "closed",
-                ":exit_price": exit_price,
-                ":pnl": pnl,
-                ":closed_at": datetime.now(timezone.utc).isoformat(),
-            }),
-        )
+        try:
+            self._trades.update_item(
+                Key={"trade_id": trade_id},
+                UpdateExpression=(
+                    "SET #s = :status, exit_price = :exit_price, "
+                    "pnl = :pnl, closed_at = :closed_at"
+                ),
+                ConditionExpression=Attr("status").eq("open"),
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues=_to_decimal({
+                    ":status": "closed",
+                    ":exit_price": exit_price,
+                    ":pnl": pnl,
+                    ":closed_at": datetime.now(timezone.utc).isoformat(),
+                }),
+            )
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                logger.debug("Duplicate trade_close %s, skipping", trade_id)
+            else:
+                raise
 
     def get_open_trades(self, symbol: str | None = None) -> list[dict]:
         if symbol:
-            response = self._trades.query(
-                IndexName="symbol-status-index",
-                KeyConditionExpression=(
+            items: list[dict] = []
+            query_kwargs = {
+                "IndexName": "symbol-status-index",
+                "KeyConditionExpression": (
                     Key("symbol").eq(symbol) & Key("status").eq("open")
                 ),
-            )
-            return [_from_decimal(item) for item in response.get("Items", [])]
+            }
+            while True:
+                response = self._trades.query(**query_kwargs)
+                items.extend(response.get("Items", []))
+                last_key = response.get("LastEvaluatedKey")
+                if not last_key:
+                    break
+                query_kwargs["ExclusiveStartKey"] = last_key
+            return [_from_decimal(item) for item in items]
 
         # Full scan with pagination to handle >1 MB of data
         items: list[dict] = []
@@ -200,7 +214,7 @@ class DynamoMemory:
                 Item=_to_decimal(item),
                 ConditionExpression=(
                     Attr("strategy_id").not_exists()
-                    | Attr("version").lte(expected_version)
+                    | Attr("version").lt(expected_version)
                 ),
             )
         except ClientError as e:
@@ -317,3 +331,26 @@ class DynamoMemory:
             ScanIndexForward=True,
         )
         return [_from_decimal(item) for item in response.get("Items", [])]
+
+    # ──────────────────────────────────────────────
+    # System state (regime, etc.)
+    # ──────────────────────────────────────────────
+
+    def set_current_regime(self, regime: str) -> None:
+        self._strategies.put_item(
+            Item={
+                "strategy_id": "__system_regime__",
+                "regime": regime,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "is_active": 0,
+            }
+        )
+
+    def get_current_regime(self) -> str:
+        response = self._strategies.get_item(
+            Key={"strategy_id": "__system_regime__"},
+        )
+        item = response.get("Item")
+        if item:
+            return item.get("regime", "")
+        return ""

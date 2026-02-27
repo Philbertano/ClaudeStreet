@@ -14,9 +14,7 @@ import aws_cdk as cdk
 from aws_cdk import (
     aws_cloudwatch as cw,
     aws_cloudwatch_actions as cw_actions,
-    aws_logs as logs,
     aws_sns as sns,
-    aws_sns_subscriptions as subs,
     Duration,
 )
 from constructs import Construct

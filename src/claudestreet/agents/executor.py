@@ -97,6 +97,9 @@ class ExecutorAgent(BaseAgent):
 
         trade_id = f"trade-{uuid.uuid4().hex[:8]}"
 
+        # Track whether the trade record was created successfully
+        trade_recorded = False
+
         try:
             # Record trade open with PENDING state
             self.memory.record_trade_open(
@@ -109,6 +112,7 @@ class ExecutorAgent(BaseAgent):
                 take_profit=proposal.take_profit,
                 strategy_id=proposal.strategy_id,
             )
+            trade_recorded = True
 
             # Transition to SUBMITTED
             self._osm.transition(trade_id, OrderState.PENDING, OrderState.SUBMITTED)
@@ -165,10 +169,15 @@ class ExecutorAgent(BaseAgent):
                 )]
         except Exception as e:
             logger.exception("[executor] Live execution failed")
-            self._osm.transition(
-                trade_id, OrderState.SUBMITTED, OrderState.FAILED,
-                metadata={"error": str(e)},
-            )
+            # Only attempt state transition if the trade record exists in DynamoDB
+            if trade_recorded:
+                try:
+                    self._osm.transition(
+                        trade_id, OrderState.SUBMITTED, OrderState.FAILED,
+                        metadata={"error": str(e)},
+                    )
+                except Exception:
+                    logger.debug("Could not transition trade %s to FAILED", trade_id)
             return [self.emit(
                 EventType.TRADE_FAILED,
                 payload={

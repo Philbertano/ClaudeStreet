@@ -7,9 +7,7 @@ Uses yfinance for market data.
 from __future__ import annotations
 
 import logging
-from functools import partial
 
-import numpy as np
 import pandas as pd
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter, retry_if_exception_type
 
@@ -97,7 +95,6 @@ class MarketDataConnector:
     ) -> pd.DataFrame | None:
         """Compute rolling correlation matrix between symbols using returns."""
         try:
-            import yfinance as yf
 
             data = {}
             for sym in symbols:

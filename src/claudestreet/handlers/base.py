@@ -21,7 +21,6 @@ import time
 import traceback
 from typing import Callable, Type
 
-import boto3
 
 from claudestreet.agents.base import BaseAgent
 from claudestreet.core.config import load_config

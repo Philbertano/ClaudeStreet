@@ -7,7 +7,6 @@ that the Mutator and Population classes depend on.
 
 from __future__ import annotations
 
-import copy
 import random
 
 from claudestreet.models.strategy import StrategyGenome, StrategyGene

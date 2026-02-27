@@ -18,10 +18,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sys
 import uuid
 from datetime import datetime, timezone
-from typing import Any
 
 import anthropic
 import boto3
@@ -30,7 +28,7 @@ from claudestreet.connectors.market_data import MarketDataConnector
 from claudestreet.core.config import load_config
 from claudestreet.core.event_bus import EventBridgeClient
 from claudestreet.core.memory import DynamoMemory
-from claudestreet.evolve_engine.backtest import BacktestEngine, BacktestResult
+from claudestreet.evolve_engine.backtest import BacktestEngine
 from claudestreet.evolve_engine.sandbox import load_strategy_from_source, validate_strategy
 from claudestreet.evolve_engine.tools import TOOLS
 from claudestreet.models.events import Event, EventType
@@ -353,9 +351,8 @@ class EvolutionEngine:
 
         if closed:
             wins = [t for t in closed if t.get("pnl", 0) > 0]
-            losses = [t for t in closed if t.get("pnl", 0) < 0]
             lines.append(f"Win rate: {len(wins)}/{len(closed)} ({len(wins)/len(closed):.0%})")
-            lines.append(f"\nRecent trades (last 15):")
+            lines.append("\nRecent trades (last 15):")
             for t in closed[-15:]:
                 lines.append(
                     f"  {t.get('symbol')} {t.get('side')} "
@@ -396,7 +393,7 @@ class EvolutionEngine:
 
         errors = validate_strategy(strategy_cls)
         if errors:
-            return f"FAILED validation:\n" + "\n".join(f"  - {e}" for e in errors)
+            return "FAILED validation:\n" + "\n".join(f"  - {e}" for e in errors)
 
         # Assign ID and store
         strategy_id = f"custom-{uuid.uuid4().hex[:8]}"

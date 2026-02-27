@@ -60,28 +60,24 @@ class BrokerConnector:
         order_type: str = "limit",
         time_in_force: str = "day",
     ) -> dict[str, Any]:
-        try:
-            client = self._get_client()
-            kwargs: dict[str, Any] = {
-                "symbol": symbol,
-                "qty": quantity,
-                "side": side,
-                "type": order_type,
-                "time_in_force": time_in_force,
-            }
-            if limit_price and order_type == "limit":
-                kwargs["limit_price"] = str(limit_price)
+        client = self._get_client()
+        kwargs: dict[str, Any] = {
+            "symbol": symbol,
+            "qty": quantity,
+            "side": side,
+            "type": order_type,
+            "time_in_force": time_in_force,
+        }
+        if limit_price and order_type == "limit":
+            kwargs["limit_price"] = str(limit_price)
 
-            order = client.submit_order(**kwargs)
-            return {
-                "order_id": order.id,
-                "status": order.status,
-                "fill_price": float(order.filled_avg_price or limit_price or 0),
-                "filled_qty": int(order.filled_qty or 0),
-            }
-        except Exception as e:
-            logger.exception("Order failed for %s", symbol)
-            return {"order_id": None, "status": "error", "error": str(e)}
+        order = client.submit_order(**kwargs)
+        return {
+            "order_id": order.id,
+            "status": order.status,
+            "fill_price": float(order.filled_avg_price or limit_price or 0),
+            "filled_qty": int(order.filled_qty or 0),
+        }
 
     @retry(
         stop=stop_after_attempt(3),
@@ -93,18 +89,14 @@ class BrokerConnector:
         reraise=True,
     )
     def get_positions(self) -> list[dict[str, Any]]:
-        try:
-            client = self._get_client()
-            return [
-                {
-                    "symbol": p.symbol,
-                    "quantity": int(p.qty),
-                    "entry_price": float(p.avg_entry_price),
-                    "current_price": float(p.current_price),
-                    "unrealized_pnl": float(p.unrealized_pl),
-                }
-                for p in client.list_positions()
-            ]
-        except Exception:
-            logger.exception("Failed to get positions")
-            return []
+        client = self._get_client()
+        return [
+            {
+                "symbol": p.symbol,
+                "quantity": int(p.qty),
+                "entry_price": float(p.avg_entry_price),
+                "current_price": float(p.current_price),
+                "unrealized_pnl": float(p.unrealized_pl),
+            }
+            for p in client.list_positions()
+        ]

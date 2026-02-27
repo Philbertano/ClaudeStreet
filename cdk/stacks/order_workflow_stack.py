@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import aws_cdk as cdk
 from aws_cdk import (
-    aws_iam as iam,
-    aws_lambda as lambda_,
     aws_logs as logs,
     aws_stepfunctions as sfn,
     aws_stepfunctions_tasks as sfn_tasks,
@@ -103,7 +101,7 @@ class OrderWorkflowStack(cdk.Stack):
             .next(
                 check_approval
                 .when(
-                    sfn.Condition.string_equals("$.riskResult.Payload.statusCode", "200"),
+                    sfn.Condition.number_equals("$.riskResult.Payload.statusCode", 200),
                     submit_order
                     .next(record_trade)
                     .next(success)
