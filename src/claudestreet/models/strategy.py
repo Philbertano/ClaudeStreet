@@ -97,3 +97,8 @@ class Strategy(BaseModel):
     last_evaluated: datetime | None = None
     total_trades: int = 0
     total_pnl: float = 0.0
+    regime_preference: str = ""  # "trending_bull", "trending_bear", "mean_reverting", "high_volatility", "" = all
+    kelly_fraction_mult: float = 0.5  # half-Kelly default, range 0.25-0.75
+    # Thompson Sampling stats
+    wins: int = 0
+    losses: int = 0

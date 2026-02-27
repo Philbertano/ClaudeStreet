@@ -7,6 +7,7 @@ import aws_cdk as cdk
 
 from stacks.core_stack import CoreStack
 from stacks.agents_stack import AgentsStack
+from stacks.order_workflow_stack import OrderWorkflowStack
 from stacks.monitoring_stack import MonitoringStack
 
 app = cdk.App()
@@ -26,6 +27,13 @@ agents = AgentsStack(
     app, f"{prefix}-agents", env=env, prefix=prefix, core=core,
 )
 agents.add_dependency(core)
+
+# Order Workflow: Step Functions Express Workflow
+order_workflow = OrderWorkflowStack(
+    app, f"{prefix}-order-workflow", env=env, prefix=prefix,
+    core=core, agents=agents,
+)
+order_workflow.add_dependency(agents)
 
 # Monitoring: CloudWatch dashboard, alarms, SNS
 monitoring = MonitoringStack(

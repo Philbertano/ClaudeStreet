@@ -2,6 +2,7 @@
 
 Validates every trade proposal against risk limits.
 Enforces position sizing, exposure, daily loss limits,
+portfolio heat, correlation checks, sector concentration,
 and time restrictions before any order reaches the Executor.
 """
 
@@ -29,7 +30,7 @@ class RiskGuardAgent(BaseAgent):
         return []
 
     def heartbeat(self) -> list[Event]:
-        """Periodic portfolio risk check."""
+        """Periodic portfolio risk check + position reconciliation."""
         events: list[Event] = []
         open_trades = self.memory.get_open_trades()
         capital = self.config.get("initial_capital", 100000.0)
@@ -56,7 +57,125 @@ class RiskGuardAgent(BaseAgent):
                     "symbols": [t["symbol"] for t in unprotected],
                 },
             ))
+
+        # Portfolio heat check
+        total_risk = sum(
+            abs(t.get("entry_price", 0) - t.get("stop_loss", 0)) * t.get("quantity", 0)
+            for t in open_trades
+            if t.get("stop_loss", 0) > 0
+        )
+        heat_pct = total_risk / capital if capital > 0 else 0
+        if heat_pct > 0.06:
+            events.append(self.emit(
+                EventType.RISK_ALERT,
+                payload={
+                    "alert_type": "portfolio_heat_exceeded",
+                    "heat_pct": round(heat_pct, 4),
+                    "limit": 0.06,
+                },
+                priority=EventPriority.HIGH,
+            ))
+
+        # Position reconciliation: compare internal vs broker positions
+        if not self.config.get("paper_trading", True):
+            events.extend(self._reconcile_positions(open_trades))
+
         return events
+
+    def _reconcile_positions(self, internal_trades: list[dict]) -> list[Event]:
+        """Compare DynamoDB positions vs broker API positions."""
+        events: list[Event] = []
+        try:
+            from claudestreet.connectors.broker import BrokerConnector
+            broker = BrokerConnector(
+                api_key=self.config.get("alpaca_api_key", ""),
+                secret_key=self.config.get("alpaca_secret_key", ""),
+                base_url=self.config.get("alpaca_base_url", "https://paper-api.alpaca.markets"),
+            )
+            broker_positions = broker.get_positions()
+
+            internal_by_symbol: dict[str, int] = {}
+            for t in internal_trades:
+                sym = t.get("symbol", "")
+                internal_by_symbol[sym] = internal_by_symbol.get(sym, 0) + t.get("quantity", 0)
+
+            broker_by_symbol: dict[str, int] = {}
+            for p in broker_positions:
+                broker_by_symbol[p["symbol"]] = p["quantity"]
+
+            all_symbols = set(internal_by_symbol.keys()) | set(broker_by_symbol.keys())
+            mismatches = []
+            for sym in all_symbols:
+                internal_qty = internal_by_symbol.get(sym, 0)
+                broker_qty = broker_by_symbol.get(sym, 0)
+                if internal_qty != broker_qty:
+                    mismatches.append({
+                        "symbol": sym,
+                        "internal_qty": internal_qty,
+                        "broker_qty": broker_qty,
+                        "drift": broker_qty - internal_qty,
+                    })
+
+            if mismatches:
+                events.append(self.emit(
+                    EventType.RISK_ALERT,
+                    payload={
+                        "alert_type": "position_mismatch",
+                        "mismatches": mismatches,
+                    },
+                    priority=EventPriority.CRITICAL,
+                ))
+                logger.warning("[risk_guard] Position mismatch: %s", mismatches)
+
+        except Exception:
+            logger.exception("[risk_guard] Position reconciliation failed")
+
+        return events
+
+    def _check_portfolio_heat(
+        self, proposal: TradeProposalPayload, open_trades: list[dict], capital: float
+    ) -> str | None:
+        """Check if total open risk (portfolio heat) exceeds 6% of capital."""
+        existing_risk = sum(
+            abs(t.get("entry_price", 0) - t.get("stop_loss", 0)) * t.get("quantity", 0)
+            for t in open_trades
+            if t.get("stop_loss", 0) > 0
+        )
+        new_risk = abs(proposal.entry_price - proposal.stop_loss) * proposal.quantity
+        total_heat = (existing_risk + new_risk) / capital if capital > 0 else 0
+
+        heat_limit = self.config.get("portfolio_heat_limit", 0.06)
+        if total_heat > heat_limit:
+            return f"Portfolio heat {total_heat:.1%} would exceed {heat_limit:.0%} limit"
+        return None
+
+    def _check_correlation(
+        self, proposal: TradeProposalPayload, open_trades: list[dict]
+    ) -> str | None:
+        """Reject positions with >0.7 correlation to existing holdings."""
+        existing_symbols = list({t.get("symbol", "") for t in open_trades})
+        if not existing_symbols or proposal.symbol in existing_symbols:
+            return None
+
+        try:
+            from claudestreet.connectors.market_data import MarketDataConnector
+            connector = MarketDataConnector()
+            corr = connector.get_correlation_matrix(
+                [proposal.symbol] + existing_symbols[:5], period="3mo"
+            )
+            if corr is not None:
+                for sym in existing_symbols:
+                    if sym in corr.columns and proposal.symbol in corr.index:
+                        pair_corr = abs(corr.loc[proposal.symbol, sym])
+                        if pair_corr > 0.7:
+                            return (
+                                f"{proposal.symbol} has {pair_corr:.2f} correlation "
+                                f"with existing position {sym}"
+                            )
+        except Exception:
+            logger.debug("Correlation check unavailable, skipping")
+
+        return None
 
     def _validate(self, event: Event) -> list[Event]:
         proposal = TradeProposalPayload(**event.payload)
@@ -100,6 +219,16 @@ class RiskGuardAgent(BaseAgent):
             parts = window.split("-")
             if len(parts) == 2 and parts[0] <= current_time <= parts[1]:
                 rejections.append(f"Restricted window {window}")
+
+        # 7. Portfolio heat check
+        heat_rejection = self._check_portfolio_heat(proposal, all_open, capital)
+        if heat_rejection:
+            rejections.append(heat_rejection)
+
+        # 8. Correlation check
+        corr_rejection = self._check_correlation(proposal, all_open)
+        if corr_rejection:
+            rejections.append(corr_rejection)
 
         if rejections:
             logger.info("[risk_guard] REJECTED %s %s: %s",

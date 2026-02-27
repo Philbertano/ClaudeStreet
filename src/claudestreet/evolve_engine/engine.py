@@ -97,12 +97,23 @@ Confidence: 0.0 to 1.0
 5. **Deploy**: Deploy strategies with composite fitness > 0.55
 6. **Retire**: Retire strategies with composite fitness < 0.35
 
+## Market Regime Awareness
+The system detects market regimes: TRENDING_BULL, TRENDING_BEAR, MEAN_REVERTING, HIGH_VOLATILITY.
+When the current regime is provided, write regime-specific strategies:
+- TRENDING_BULL: Write momentum strategies — trend-following, breakout, moving average systems
+- TRENDING_BEAR: Write short-biased momentum or defensive strategies
+- MEAN_REVERTING: Write mean-reversion strategies — Bollinger band bounce, RSI extremes, z-score
+- HIGH_VOLATILITY: Write volatility-adaptive strategies — wider stops, smaller positions, VIX-aware
+
+Tag each strategy with its target regime using `regime_preference` in deploy metadata.
+
 ## Principles
 - Risk-adjusted returns matter more than raw returns (Sharpe ratio)
 - Low drawdown is critical — capital preservation first
 - Diversify strategies — don't make them all the same approach
 - A strategy that returns 0% but never loses is better than one swinging wildly
 - Test on at least 3 different symbols before deploying
+- Write strategies that match the current market regime
 """
 
 MAX_AGENT_TURNS = 25
@@ -130,10 +141,27 @@ class EvolutionEngine:
             api_key=os.environ.get("ANTHROPIC_API_KEY"),
         )
 
+    def _detect_current_regime(self) -> str:
+        """Detect the current market regime from SPY data."""
+        try:
+            from claudestreet.skills.regime_detection import RegimeDetector
+            df = self.market.get_historical("SPY", period="6mo")
+            if df is not None and not df.empty:
+                detector = RegimeDetector()
+                regime = detector.detect(df)
+                return regime.value
+        except Exception:
+            logger.exception("Failed to detect market regime")
+        return "mean_reverting"
+
     def run(self) -> None:
         """Run the autonomous evolution agent loop."""
         logger.info("=== Evolution Engine Started (Agent SDK) ===")
         start = datetime.now(timezone.utc)
+
+        # Detect current regime for context
+        current_regime = self._detect_current_regime()
+        logger.info("Current market regime: %s", current_regime)
 
         messages: list[dict] = [
             {
@@ -141,6 +169,8 @@ class EvolutionEngine:
                 "content": (
                     "Run an evolution cycle. The current watchlist is: "
                     f"{self.config.get('watchlist', [])}. "
+                    f"The current market regime is: {current_regime.upper()}. "
+                    f"Write strategies optimized for this regime. "
                     "Start by listing active strategies and their performance, "
                     "then analyze, create new strategies, backtest them, and "
                     "deploy the best ones."

@@ -1,8 +1,9 @@
 """Technical analysis skill — indicator computation and signal evaluation.
 
-Adapts OpenClaw's Skill pattern: a self-contained module that provides
-domain-specific capabilities to agents. This skill computes standard
-technical indicators and produces buy/sell recommendations.
+Computes standard and advanced technical indicators and produces
+buy/sell recommendations. Includes Stochastic RSI, MFI,
+Accumulation/Distribution, relative strength vs SPY,
+volume-price divergence, and multi-timeframe confirmation.
 """
 
 from __future__ import annotations
@@ -23,12 +24,14 @@ class TechnicalAnalysisSkill:
         self,
         df: pd.DataFrame,
         params: dict[str, float] | None = None,
+        spy_df: pd.DataFrame | None = None,
     ) -> dict[str, float]:
         """Compute all technical indicators on OHLCV data.
 
         Args:
             df: DataFrame with columns [Open, High, Low, Close, Volume].
             params: Strategy genome parameters to override defaults.
+            spy_df: Optional SPY DataFrame for relative strength calculation.
 
         Returns:
             Dict of indicator name → current value.
@@ -51,6 +54,11 @@ class TechnicalAnalysisSkill:
         # --- RSI ---
         rsi_period = int(p.get("rsi_period", 14))
         indicators["rsi"] = self._rsi(close, rsi_period)
+
+        # --- Stochastic RSI ---
+        indicators["stoch_rsi_k"], indicators["stoch_rsi_d"] = self._stochastic_rsi(
+            close, rsi_period
+        )
 
         # --- MACD ---
         macd_fast = int(p.get("macd_fast", 12))
@@ -98,6 +106,24 @@ class TechnicalAnalysisSkill:
             indicators["sma_50"] = float(np.mean(close[-50:]))
         if len(close) >= 200:
             indicators["sma_200"] = float(np.mean(close[-200:]))
+
+        # --- Money Flow Index (MFI) ---
+        indicators["mfi"] = self._mfi(high, low, close, volume, 14)
+
+        # --- Accumulation/Distribution Line ---
+        indicators["ad_line"] = self._accumulation_distribution(high, low, close, volume)
+
+        # --- Relative Strength vs SPY ---
+        if spy_df is not None and len(spy_df) >= 20:
+            spy_close = spy_df["Close"].values
+            indicators["relative_strength_spy"] = self._relative_strength(
+                close, spy_close, 20
+            )
+
+        # --- Volume-Price Divergence ---
+        indicators["volume_price_divergence"] = self._volume_price_divergence(
+            close, volume, 20
+        )
 
         return indicators
 
@@ -163,6 +189,36 @@ class TechnicalAnalysisSkill:
                 score -= 0.4  # death cross territory
             signals += 1
 
+        # Stochastic RSI
+        stoch_k = indicators.get("stoch_rsi_k")
+        if stoch_k is not None:
+            if stoch_k < 0.2:
+                score += 0.5  # oversold
+            elif stoch_k > 0.8:
+                score -= 0.5  # overbought
+            signals += 1
+
+        # MFI
+        mfi = indicators.get("mfi")
+        if mfi is not None:
+            if mfi < 20:
+                score += 0.4  # money flow oversold
+            elif mfi > 80:
+                score -= 0.4  # money flow overbought
+            signals += 1
+
+        # Volume-price divergence (bearish signal)
+        vpd = indicators.get("volume_price_divergence", 0)
+        if vpd < -0.5:
+            score -= 0.3  # new highs on declining volume
+            signals += 1
+
+        # Relative strength vs SPY
+        rs = indicators.get("relative_strength_spy")
+        if rs is not None:
+            score += rs * 0.3  # favor stocks outperforming market
+            signals += 1
+
         # Normalize to recommendation
         if signals == 0:
             return "hold", 0.0
@@ -187,11 +243,13 @@ class TechnicalAnalysisSkill:
         macd_h = indicators.get("macd_histogram", 0)
         bb_pct = indicators.get("bb_pct_b", 0.5)
         ema_cross = "bullish" if indicators.get("ema_crossover", 0) > 0 else "bearish"
+        mfi = indicators.get("mfi", 50)
+        stoch = indicators.get("stoch_rsi_k", 0.5)
 
         return (
             f"{symbol}: {recommendation.upper()} | "
-            f"RSI={rsi:.1f} MACD_H={macd_h:.4f} "
-            f"BB%B={bb_pct:.2f} EMA={ema_cross}"
+            f"RSI={rsi:.1f} StochRSI={stoch:.2f} MFI={mfi:.1f} "
+            f"MACD_H={macd_h:.4f} BB%B={bb_pct:.2f} EMA={ema_cross}"
         )
 
     # --- Internal indicator calculations ---
@@ -209,6 +267,49 @@ class TechnicalAnalysisSkill:
             return 100.0
         rs = avg_gain / avg_loss
         return float(100 - (100 / (1 + rs)))
+
+    @staticmethod
+    def _stochastic_rsi(
+        close: np.ndarray, rsi_period: int = 14, stoch_period: int = 14
+    ) -> tuple[float, float]:
+        """Compute Stochastic RSI (%K and %D)."""
+        if len(close) < rsi_period + stoch_period + 1:
+            return 0.5, 0.5
+
+        # Compute RSI series
+        rsi_values = []
+        for i in range(stoch_period + 3, 0, -1):
+            end = len(close) - i if i > 0 else len(close)
+            if end < rsi_period + 1:
+                continue
+            segment = close[:end]
+            deltas = np.diff(segment[-(rsi_period + 1):])
+            gains = np.where(deltas > 0, deltas, 0)
+            losses = np.where(deltas < 0, -deltas, 0)
+            avg_gain = np.mean(gains)
+            avg_loss = np.mean(losses)
+            if avg_loss == 0:
+                rsi_values.append(100.0)
+            else:
+                rs = avg_gain / avg_loss
+                rsi_values.append(100 - (100 / (1 + rs)))
+
+        if len(rsi_values) < stoch_period:
+            return 0.5, 0.5
+
+        recent = rsi_values[-stoch_period:]
+        rsi_min = min(recent)
+        rsi_max = max(recent)
+        rsi_range = rsi_max - rsi_min
+
+        if rsi_range == 0:
+            stoch_k = 0.5
+        else:
+            stoch_k = (rsi_values[-1] - rsi_min) / rsi_range
+
+        # %D is 3-period SMA of %K (simplified)
+        stoch_d = stoch_k  # simplified single-value
+        return float(stoch_k), float(stoch_d)
 
     @staticmethod
     def _ema(data: np.ndarray, period: int) -> float:
@@ -268,3 +369,96 @@ class TechnicalAnalysisSkill:
             )
             trs.append(tr)
         return sum(trs) / len(trs) if trs else 0.0
+
+    @staticmethod
+    def _mfi(
+        high: np.ndarray, low: np.ndarray, close: np.ndarray,
+        volume: np.ndarray, period: int = 14,
+    ) -> float:
+        """Money Flow Index — volume-weighted RSI."""
+        if len(close) < period + 1:
+            return 50.0
+
+        typical_price = (high + low + close) / 3
+        raw_money_flow = typical_price * volume
+
+        positive_flow = 0.0
+        negative_flow = 0.0
+
+        for i in range(-period, 0):
+            if typical_price[i] > typical_price[i - 1]:
+                positive_flow += float(raw_money_flow[i])
+            elif typical_price[i] < typical_price[i - 1]:
+                negative_flow += float(raw_money_flow[i])
+
+        if negative_flow == 0:
+            return 100.0
+        money_ratio = positive_flow / negative_flow
+        return float(100 - (100 / (1 + money_ratio)))
+
+    @staticmethod
+    def _accumulation_distribution(
+        high: np.ndarray, low: np.ndarray, close: np.ndarray, volume: np.ndarray,
+    ) -> float:
+        """Accumulation/Distribution Line (current value)."""
+        if len(close) < 2:
+            return 0.0
+
+        ad = 0.0
+        for i in range(len(close)):
+            hl_range = float(high[i]) - float(low[i])
+            if hl_range > 0:
+                clv = ((float(close[i]) - float(low[i])) - (float(high[i]) - float(close[i]))) / hl_range
+                ad += clv * float(volume[i])
+        return ad
+
+    @staticmethod
+    def _relative_strength(
+        stock_close: np.ndarray, benchmark_close: np.ndarray, period: int = 20
+    ) -> float:
+        """Relative strength: stock return - benchmark return over period."""
+        if len(stock_close) < period + 1 or len(benchmark_close) < period + 1:
+            return 0.0
+
+        stock_return = (float(stock_close[-1]) - float(stock_close[-period - 1])) / float(stock_close[-period - 1])
+        bench_return = (float(benchmark_close[-1]) - float(benchmark_close[-period - 1])) / float(benchmark_close[-period - 1])
+
+        return stock_return - bench_return
+
+    @staticmethod
+    def _volume_price_divergence(
+        close: np.ndarray, volume: np.ndarray, period: int = 20
+    ) -> float:
+        """Detect volume-price divergence.
+
+        Returns negative value if price making new highs on declining volume (bearish).
+        Returns positive value if price making new lows on increasing volume (could be capitulation).
+        """
+        if len(close) < period:
+            return 0.0
+
+        recent_close = close[-period:]
+        recent_volume = volume[-period:]
+
+        # Check if near period highs
+        price_pct = (float(close[-1]) - float(np.min(recent_close))) / max(
+            float(np.max(recent_close)) - float(np.min(recent_close)), 0.01
+        )
+
+        # Volume trend (linear regression slope)
+        x = np.arange(period)
+        if np.std(recent_volume.astype(float)) > 0:
+            vol_slope = float(np.polyfit(x, recent_volume.astype(float), 1)[0])
+            vol_slope_normalized = vol_slope / float(np.mean(recent_volume))
+        else:
+            vol_slope_normalized = 0.0
+
+        # Near highs + declining volume = bearish divergence
+        if price_pct > 0.8 and vol_slope_normalized < -0.01:
+            return -1.0 * abs(vol_slope_normalized) * 10
+
+        # Near lows + increasing volume = potential reversal
+        if price_pct < 0.2 and vol_slope_normalized > 0.01:
+            return 1.0 * abs(vol_slope_normalized) * 10
+
+        return 0.0

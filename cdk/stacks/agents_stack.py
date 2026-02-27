@@ -20,6 +20,7 @@ from aws_cdk import (
     aws_events_targets as targets,
     aws_iam as iam,
     aws_lambda as lambda_,
+    aws_lambda_event_sources as lambda_event_sources,
     aws_logs as logs,
     aws_scheduler as scheduler,
     aws_sqs as sqs,
@@ -38,6 +39,7 @@ AGENT_SPECS = {
         "heartbeat_minutes": 1,
         "timeout_seconds": 60,
         "memory_mb": 512,
+        "provisioned_concurrency": 1,
     },
     "analyst": {
         "handler": "claudestreet.handlers.analyst.handler",
@@ -45,6 +47,7 @@ AGENT_SPECS = {
         "heartbeat_minutes": 5,
         "timeout_seconds": 120,
         "memory_mb": 1024,
+        "provisioned_concurrency": 0,
     },
     "strategist": {
         "handler": "claudestreet.handlers.strategist.handler",
@@ -52,6 +55,7 @@ AGENT_SPECS = {
         "heartbeat_minutes": None,  # evolution runs on Fargate, not Lambda
         "timeout_seconds": 30,
         "memory_mb": 256,
+        "provisioned_concurrency": 0,
     },
     "risk_guard": {
         "handler": "claudestreet.handlers.risk_guard.handler",
@@ -59,6 +63,7 @@ AGENT_SPECS = {
         "heartbeat_minutes": 2,
         "timeout_seconds": 30,
         "memory_mb": 256,
+        "provisioned_concurrency": 2,
     },
     "executor": {
         "handler": "claudestreet.handlers.executor.handler",
@@ -66,6 +71,7 @@ AGENT_SPECS = {
         "heartbeat_minutes": None,
         "timeout_seconds": 30,
         "memory_mb": 256,
+        "provisioned_concurrency": 2,
     },
     "chronicler": {
         "handler": "claudestreet.handlers.chronicler.handler",
@@ -77,6 +83,7 @@ AGENT_SPECS = {
         "heartbeat_minutes": 10,
         "timeout_seconds": 30,
         "memory_mb": 256,
+        "provisioned_concurrency": 0,
     },
 }
 
@@ -116,15 +123,56 @@ class AgentsStack(cdk.Stack):
         # ── IAM role for all agent Lambdas ──
         self.agent_role = self._create_agent_role(core)
 
-        # ── Create Lambda + EventBridge rule for each agent ──
+        # ── Per-agent SQS queues (EventBridge → SQS → Lambda) ──
+        self.agent_queues: dict[str, sqs.Queue] = {}
+
+        # ── Create Lambda + SQS + EventBridge rule for each agent ──
         for agent_name, spec in AGENT_SPECS.items():
             fn = self._create_agent_lambda(agent_name, spec, docker_image)
-            self._create_event_rules(agent_name, spec, fn, core.event_bus)
+
+            # Create per-agent SQS queue (EventBridge → SQS → Lambda)
+            agent_queue = sqs.Queue(
+                self, f"{agent_name}Queue",
+                queue_name=f"{prefix}-{agent_name}-queue",
+                visibility_timeout=Duration.seconds(spec["timeout_seconds"] * 6),
+                dead_letter_queue=sqs.DeadLetterQueue(
+                    max_receive_count=3,
+                    queue=self.dlq,
+                ),
+                encryption=sqs.QueueEncryption.KMS,
+                encryption_master_key=core.kms_key,
+            )
+            self.agent_queues[agent_name] = agent_queue
+
+            # Lambda consumes from SQS
+            fn.add_event_source(lambda_event_sources.SqsEventSource(
+                agent_queue,
+                batch_size=1,
+            ))
+
+            # EventBridge → SQS (instead of EventBridge → Lambda directly)
+            self._create_event_rules(agent_name, spec, agent_queue, core.event_bus)
 
             if spec.get("heartbeat_minutes"):
                 self._create_heartbeat_schedule(agent_name, spec, fn)
 
+            # Provisioned concurrency
+            pc = spec.get("provisioned_concurrency", 0)
+            if pc > 0:
+                alias = fn.add_alias("live",
+                    provisioned_concurrent_executions=pc,
+                )
+
             self.functions[agent_name] = fn
+
+        # ── DLQ Replayer Lambda ──
+        self._create_dlq_replayer(docker_image, core)
+
+        # ── DynamoDB Stream processor Lambda ──
+        self._create_stream_processor(docker_image, core)
+
+        # ── WebSocket feeder Fargate task ──
+        self._create_websocket_feeder(core)
 
         # ── Fargate evolution engine ──
         self._create_fargate_evolution(core)
@@ -149,6 +197,7 @@ class AgentsStack(cdk.Stack):
         for table in [
             core.trades_table, core.strategies_table,
             core.snapshots_table, core.events_table,
+            core.attributions_table,
         ]:
             table.grant_read_write_data(role)
 
@@ -163,6 +212,9 @@ class AgentsStack(cdk.Stack):
 
         # KMS decrypt
         core.kms_key.grant_decrypt(role)
+
+        # Kinesis read (for Sentinel consuming market data stream)
+        core.market_data_stream.grant_read(role)
 
         # SSM parameter read
         role.add_to_policy(iam.PolicyStatement(
@@ -192,6 +244,7 @@ class AgentsStack(cdk.Stack):
                 "SNAPSHOTS_TABLE": self.core.snapshots_table.table_name,
                 "EVENTS_TABLE": self.core.events_table.table_name,
                 "SESSION_BUCKET": self.core.session_bucket.bucket_name,
+                "KINESIS_STREAM": self.core.market_data_stream.stream_name,
                 "LOG_LEVEL": "INFO",
             },
             dead_letter_queue=self.dlq,
@@ -205,10 +258,10 @@ class AgentsStack(cdk.Stack):
         self,
         name: str,
         spec: dict,
-        fn: lambda_.Function,
+        queue: sqs.Queue,
         bus: events.EventBus,
     ) -> None:
-        """Create EventBridge rules that route specific event types to this agent."""
+        """Create EventBridge rules that route event types → SQS → Lambda."""
         for event_type in spec["events"]:
             rule = events.Rule(
                 self, f"{name}-{event_type.replace('.', '-')}-rule",
@@ -219,10 +272,9 @@ class AgentsStack(cdk.Stack):
                     detail_type=[event_type],
                 ),
             )
-            rule.add_target(targets.LambdaFunction(
-                fn,
+            rule.add_target(targets.SqsQueue(
+                queue,
                 dead_letter_queue=self.dlq,
-                retry_attempts=2,
             ))
 
     def _create_heartbeat_schedule(
@@ -256,6 +308,153 @@ class AgentsStack(cdk.Stack):
                 + '"}}}',
             ),
         )
+
+    def _create_dlq_replayer(
+        self,
+        image: lambda_.DockerImageCode,
+        core: CoreStack,
+    ) -> None:
+        """Create Lambda that replays messages from the DLQ."""
+        replayer_fn = lambda_.DockerImageFunction(
+            self, "DlqReplayerFn",
+            function_name=f"{self.prefix}-dlq-replayer",
+            code=image,
+            timeout=Duration.seconds(60),
+            memory_size=256,
+            role=self.agent_role,
+            environment={
+                "CLAUDESTREET_EVENT_BUS": core.event_bus.event_bus_name,
+                "DLQ_URL": self.dlq.queue_url,
+                "LOG_LEVEL": "INFO",
+            },
+            log_retention=logs.RetentionDays.TWO_WEEKS,
+            command=["claudestreet.handlers.dlq_replayer.handler"],
+        )
+
+        # Grant SQS read/delete on DLQ
+        self.dlq.grant_consume_messages(replayer_fn)
+
+        # Schedule every 5 minutes to check DLQ
+        replayer_rule = events.Rule(
+            self, "DlqReplaySchedule",
+            rule_name=f"{self.prefix}-dlq-replay-schedule",
+            schedule=events.Schedule.rate(Duration.minutes(5)),
+        )
+        replayer_rule.add_target(targets.LambdaFunction(replayer_fn))
+
+        self.dlq_replayer = replayer_fn
+
+    def _create_stream_processor(
+        self,
+        image: lambda_.DockerImageCode,
+        core: CoreStack,
+    ) -> None:
+        """Create Lambda triggered by DynamoDB Streams on the trades table."""
+        stream_fn = lambda_.DockerImageFunction(
+            self, "StreamProcessorFn",
+            function_name=f"{self.prefix}-stream-processor",
+            code=image,
+            timeout=Duration.seconds(60),
+            memory_size=256,
+            role=self.agent_role,
+            environment={
+                "CLAUDESTREET_EVENT_BUS": core.event_bus.event_bus_name,
+                "TRADES_TABLE": core.trades_table.table_name,
+                "STRATEGIES_TABLE": core.strategies_table.table_name,
+                "LOG_LEVEL": "INFO",
+            },
+            log_retention=logs.RetentionDays.TWO_WEEKS,
+            command=["claudestreet.handlers.stream_processor.handler"],
+        )
+
+        # Trigger from DynamoDB Streams on trades table
+        stream_fn.add_event_source(lambda_event_sources.DynamoEventSource(
+            core.trades_table,
+            starting_position=lambda_.StartingPosition.TRIM_HORIZON,
+            batch_size=10,
+            max_batching_window=Duration.seconds(5),
+            retry_attempts=3,
+            bisect_batch_on_error=True,
+            on_failure=lambda_event_sources.SqsDestination(self.dlq),
+        ))
+
+        self.stream_processor = stream_fn
+
+    def _create_websocket_feeder(self, core: CoreStack) -> None:
+        """Create Fargate task for the WebSocket market data feeder."""
+        vpc = ec2.Vpc.from_lookup(self, "FeederVpc", is_default=True)
+
+        feeder_cluster = ecs.Cluster(
+            self, "FeederCluster",
+            cluster_name=f"{self.prefix}-feeder",
+            vpc=vpc,
+        )
+
+        feeder_image = ecs.ContainerImage.from_asset(
+            directory="..",
+            file="Dockerfile",
+            exclude=["cdk", "cdk.out", ".git", "data", ".venv"],
+        )
+
+        # Task role for the WebSocket feeder
+        feeder_task_role = iam.Role(
+            self, "FeederTaskRole",
+            assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
+        )
+
+        # Grant Kinesis write access
+        core.market_data_stream.grant_write(feeder_task_role)
+        core.broker_secret.grant_read(feeder_task_role)
+        core.kms_key.grant_encrypt_decrypt(feeder_task_role)
+
+        feeder_task_role.add_to_policy(iam.PolicyStatement(
+            actions=["ssm:GetParametersByPath", "ssm:GetParameter"],
+            resources=[f"arn:aws:ssm:{self.region}:{self.account}:parameter/{self.prefix}/*"],
+        ))
+
+        feeder_task_def = ecs.FargateTaskDefinition(
+            self, "FeederTaskDef",
+            family=f"{self.prefix}-ws-feeder",
+            cpu=256,
+            memory_limit_mib=512,
+            task_role=feeder_task_role,
+        )
+
+        feeder_task_def.add_container(
+            "ws-feeder",
+            image=feeder_image,
+            logging=ecs.LogDrivers.aws_logs(
+                stream_prefix="ws-feeder",
+                log_retention=logs.RetentionDays.TWO_WEEKS,
+            ),
+            environment={
+                "KINESIS_STREAM": core.market_data_stream.stream_name,
+                "LOG_LEVEL": "INFO",
+            },
+            secrets={
+                "ALPACA_API_KEY": ecs.Secret.from_secrets_manager(
+                    core.broker_secret, "alpaca_api_key",
+                ),
+                "ALPACA_SECRET_KEY": ecs.Secret.from_secrets_manager(
+                    core.broker_secret, "alpaca_secret_key",
+                ),
+            },
+            command=["python", "-m", "claudestreet.connectors.websocket_feeder"],
+        )
+
+        # Run as a long-lived Fargate service (1 task always running)
+        ecs.FargateService(
+            self, "FeederService",
+            service_name=f"{self.prefix}-ws-feeder",
+            cluster=feeder_cluster,
+            task_definition=feeder_task_def,
+            desired_count=1,
+            assign_public_ip=True,
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),
+        )
+
+        self.feeder_cluster = feeder_cluster
+        self.feeder_task_def = feeder_task_def
 
     def _create_fargate_evolution(self, core: CoreStack) -> None:
         """Create Fargate task for the LLM-powered evolution engine."""
@@ -338,6 +537,23 @@ class AgentsStack(cdk.Stack):
             schedule=events.Schedule.rate(Duration.minutes(15)),
         )
         evo_rule.add_target(targets.EcsTask(
+            cluster=cluster,
+            task_definition=task_def,
+            subnet_selection=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),
+            assign_public_ip=True,
+        ))
+
+        # Emergency evolution on REGIME_CHANGE event
+        regime_change_rule = events.Rule(
+            self, "RegimeChangeEvoRule",
+            rule_name=f"{self.prefix}-regime-change-evolution",
+            event_bus=core.event_bus,
+            event_pattern=events.EventPattern(
+                source=events.Match.prefix("claudestreet"),
+                detail_type=["strategy.regime_change"],
+            ),
+        )
+        regime_change_rule.add_target(targets.EcsTask(
             cluster=cluster,
             task_definition=task_def,
             subnet_selection=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),

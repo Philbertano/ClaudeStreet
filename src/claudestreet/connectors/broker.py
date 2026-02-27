@@ -9,6 +9,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from tenacity import retry, stop_after_attempt, wait_exponential_jitter, retry_if_exception_type
+
 logger = logging.getLogger(__name__)
 
 
@@ -40,6 +42,15 @@ class BrokerConnector:
                 )
         return self._client
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential_jitter(initial=0.5, max=10),
+        retry=retry_if_exception_type(Exception),
+        before_sleep=lambda rs: logger.warning(
+            "Retrying submit_order (attempt %d)", rs.attempt_number
+        ),
+        reraise=True,
+    )
     def submit_order(
         self,
         symbol: str,
@@ -72,6 +83,15 @@ class BrokerConnector:
             logger.exception("Order failed for %s", symbol)
             return {"order_id": None, "status": "error", "error": str(e)}
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential_jitter(initial=0.5, max=10),
+        retry=retry_if_exception_type(Exception),
+        before_sleep=lambda rs: logger.warning(
+            "Retrying get_positions (attempt %d)", rs.attempt_number
+        ),
+        reraise=True,
+    )
     def get_positions(self) -> list[dict[str, Any]]:
         try:
             client = self._get_client()

@@ -9,7 +9,9 @@ from __future__ import annotations
 import logging
 from functools import partial
 
+import numpy as np
 import pandas as pd
+from tenacity import retry, stop_after_attempt, wait_exponential_jitter, retry_if_exception_type
 
 from claudestreet.models.events import MarketTickPayload
 
@@ -19,6 +21,15 @@ logger = logging.getLogger(__name__)
 class MarketDataConnector:
     """Synchronous market data provider backed by yfinance."""
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential_jitter(initial=0.5, max=10),
+        retry=retry_if_exception_type(Exception),
+        before_sleep=lambda rs: logger.warning(
+            "Retrying get_latest_tick (attempt %d)", rs.attempt_number
+        ),
+        reraise=True,
+    )
     def get_latest_tick(self, symbol: str) -> MarketTickPayload | None:
         try:
             import yfinance as yf
@@ -43,6 +54,15 @@ class MarketDataConnector:
             logger.exception("Failed to fetch tick for %s", symbol)
             return None
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential_jitter(initial=0.5, max=10),
+        retry=retry_if_exception_type(Exception),
+        before_sleep=lambda rs: logger.warning(
+            "Retrying get_historical (attempt %d)", rs.attempt_number
+        ),
+        reraise=True,
+    )
     def get_historical(
         self,
         symbol: str,
@@ -71,3 +91,48 @@ class MarketDataConnector:
             if tick:
                 ticks[sym] = tick
         return ticks
+
+    def get_correlation_matrix(
+        self, symbols: list[str], period: str = "3mo"
+    ) -> pd.DataFrame | None:
+        """Compute rolling correlation matrix between symbols using returns."""
+        try:
+            import yfinance as yf
+
+            data = {}
+            for sym in symbols:
+                df = self.get_historical(sym, period=period)
+                if df is not None and not df.empty:
+                    data[sym] = df["Close"].pct_change().dropna()
+
+            if len(data) < 2:
+                return None
+
+            returns_df = pd.DataFrame(data)
+            return returns_df.corr()
+        except Exception:
+            logger.exception("Failed to compute correlation matrix")
+            return None
+
+    def get_cross_asset_signals(self) -> dict[str, float]:
+        """Fetch cross-asset signals: VIX, VIX3M term structure, TLT, UUP, GLD."""
+        signals: dict[str, float] = {}
+        cross_assets = {
+            "^VIX": "vix",
+            "^VIX3M": "vix3m",
+            "TLT": "tlt",
+            "UUP": "uup",
+            "GLD": "gld",
+        }
+
+        for ticker, key in cross_assets.items():
+            tick = self.get_latest_tick(ticker)
+            if tick:
+                signals[key] = tick.price
+                signals[f"{key}_change"] = tick.change_pct
+
+        # VIX term structure (contango/backwardation)
+        if "vix" in signals and "vix3m" in signals and signals["vix3m"] > 0:
+            signals["vix_term_structure"] = signals["vix"] / signals["vix3m"]
+
+        return signals

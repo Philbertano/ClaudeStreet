@@ -34,6 +34,7 @@ class EventType(str, Enum):
     TRADE_PROPOSED = "strategy.trade_proposed"
     STRATEGY_EVOLVED = "strategy.evolved"
     STRATEGY_RETIRED = "strategy.retired"
+    REGIME_CHANGE = "strategy.regime_change"
 
     # --- Risk ---
     RISK_APPROVED = "risk.approved"
@@ -111,6 +112,7 @@ class SignalPayload(BaseModel):
     strength: float           # 0.0 to 1.0
     indicators: dict[str, float] = Field(default_factory=dict)
     timeframe: str = "1d"
+    signal_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
 
 
 class TradeProposalPayload(BaseModel):
@@ -123,6 +125,7 @@ class TradeProposalPayload(BaseModel):
     strategy_id: str
     confidence: float         # 0.0 to 1.0
     rationale: str = ""
+    signal_id: str = ""
 
 
 class TradeExecutedPayload(BaseModel):
@@ -132,6 +135,7 @@ class TradeExecutedPayload(BaseModel):
     fill_price: float
     order_id: str
     strategy_id: str
+    signal_id: str = ""
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

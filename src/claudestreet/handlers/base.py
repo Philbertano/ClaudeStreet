@@ -1,11 +1,11 @@
 """Lambda handler factory — wires agents to AWS infrastructure.
 
 Each agent Lambda follows the same pattern:
-  1. Parse EventBridge event → our Event model
+  1. Parse EventBridge/SQS event → our Event model
   2. Initialize agent with DynamoDB memory
   3. Dispatch to process() or heartbeat()
   4. Publish output events to EventBridge
-  5. Return success/failure
+  5. Return success/failure with CloudWatch EMF metrics
 
 This factory eliminates handler boilerplate and ensures
 consistent error handling, logging, and metrics across
@@ -48,11 +48,59 @@ def _get_infra() -> tuple[DynamoMemory, EventBridgeClient, dict]:
     return _memory, _eb, _config
 
 
+def _emit_emf_metrics(
+    agent_id: str,
+    duration_ms: float,
+    events_published: int,
+    success: bool,
+    trades_executed: int = 0,
+) -> None:
+    """Emit CloudWatch Embedded Metrics Format (EMF) for trading-specific metrics."""
+    emf = {
+        "_aws": {
+            "Timestamp": int(time.time() * 1000),
+            "CloudWatchMetrics": [
+                {
+                    "Namespace": "ClaudeStreet",
+                    "Dimensions": [["Agent"]],
+                    "Metrics": [
+                        {"Name": "HandlerDurationMs", "Unit": "Milliseconds"},
+                        {"Name": "EventsPublished", "Unit": "Count"},
+                        {"Name": "HandlerSuccess", "Unit": "Count"},
+                        {"Name": "HandlerError", "Unit": "Count"},
+                        {"Name": "TradesExecuted", "Unit": "Count"},
+                    ],
+                }
+            ],
+        },
+        "Agent": agent_id,
+        "HandlerDurationMs": round(duration_ms, 1),
+        "EventsPublished": events_published,
+        "HandlerSuccess": 1 if success else 0,
+        "HandlerError": 0 if success else 1,
+        "TradesExecuted": trades_executed,
+    }
+    # EMF requires printing to stdout as a single JSON line
+    print(json.dumps(emf))
+
+
+def _extract_event_from_sqs(raw_event: dict) -> dict:
+    """Extract EventBridge event from SQS envelope if present."""
+    # SQS wraps EventBridge events in Records[].body
+    records = raw_event.get("Records", [])
+    if records and "body" in records[0]:
+        body = records[0]["body"]
+        if isinstance(body, str):
+            body = json.loads(body)
+        return body
+    return raw_event
+
+
 def create_handler(agent_class: Type[BaseAgent]) -> Callable:
     """Create a Lambda handler function for an agent class.
 
     The returned handler supports both:
-      - EventBridge event routing (agent.process)
+      - EventBridge event routing via SQS (agent.process)
       - EventBridge Scheduler heartbeats (agent.heartbeat)
     """
 
@@ -62,14 +110,17 @@ def create_handler(agent_class: Type[BaseAgent]) -> Callable:
         agent = agent_class(memory=memory, config=config)
 
         try:
+            # Unwrap SQS envelope if present
+            actual_event = _extract_event_from_sqs(event)
+
             # Determine if this is a heartbeat or a routed event
-            is_heartbeat = EventBridgeClient.is_heartbeat(event)
+            is_heartbeat = EventBridgeClient.is_heartbeat(actual_event)
 
             if is_heartbeat:
                 logger.info("[%s] Heartbeat triggered", agent.agent_id)
                 output_events = agent.heartbeat()
             else:
-                parsed = EventBridgeClient.from_eventbridge(event)
+                parsed = EventBridgeClient.from_eventbridge(actual_event)
                 logger.info(
                     "[%s] Processing %s from %s",
                     agent.agent_id, parsed.type.value, parsed.source,
@@ -82,9 +133,25 @@ def create_handler(agent_class: Type[BaseAgent]) -> Callable:
                 published = eb.put_events(output_events)
 
             elapsed = (time.time() - start) * 1000
+
+            # Count trades executed in this invocation
+            trades_executed = sum(
+                1 for e in (output_events or [])
+                if e.type == EventType.TRADE_EXECUTED
+            )
+
             logger.info(
                 "[%s] Done: %d events published in %.0fms",
                 agent.agent_id, published, elapsed,
+            )
+
+            # Emit CloudWatch EMF metrics
+            _emit_emf_metrics(
+                agent_id=agent.agent_id,
+                duration_ms=elapsed,
+                events_published=published,
+                success=True,
+                trades_executed=trades_executed,
             )
 
             return {
@@ -99,6 +166,14 @@ def create_handler(agent_class: Type[BaseAgent]) -> Callable:
             logger.error(
                 "[%s] FAILED after %.0fms: %s\n%s",
                 agent.agent_id, elapsed, str(e), traceback.format_exc(),
+            )
+
+            # Emit error metrics
+            _emit_emf_metrics(
+                agent_id=agent.agent_id,
+                duration_ms=elapsed,
+                events_published=0,
+                success=False,
             )
 
             # Publish error event for observability

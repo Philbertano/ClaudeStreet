@@ -15,6 +15,7 @@ import aws_cdk as cdk
 from aws_cdk import (
     aws_dynamodb as dynamodb,
     aws_events as events,
+    aws_kinesis as kinesis,
     aws_kms as kms,
     aws_s3 as s3,
     aws_secretsmanager as secretsmanager,
@@ -61,6 +62,7 @@ class CoreStack(cdk.Stack):
         self.strategies_table = self._create_strategies_table()
         self.snapshots_table = self._create_snapshots_table()
         self.events_table = self._create_events_table()
+        self.attributions_table = self._create_attributions_table()
 
         # ── S3 bucket for sessions and evolution archives ──
         self.session_bucket = s3.Bucket(
@@ -107,6 +109,16 @@ class CoreStack(cdk.Stack):
             description="Anthropic API key for Claude Agent SDK evolution engine",
         )
 
+        # ── Kinesis Data Stream for real-time market data ──
+        self.market_data_stream = kinesis.Stream(
+            self, "MarketDataStream",
+            stream_name=f"{prefix}-market-data",
+            shard_count=2,
+            retention_period=Duration.hours(24),
+            encryption=kinesis.StreamEncryption.KMS,
+            encryption_key=self.kms_key,
+        )
+
         # ── SSM parameters for runtime config ──
         ssm.StringParameter(
             self, "ConfigWatchlist",
@@ -124,6 +136,8 @@ class CoreStack(cdk.Stack):
         cdk.CfnOutput(self, "TradesTable", value=self.trades_table.table_name)
         cdk.CfnOutput(self, "StrategiesTable", value=self.strategies_table.table_name)
         cdk.CfnOutput(self, "SessionBucket", value=self.session_bucket.bucket_name)
+        cdk.CfnOutput(self, "AttributionsTable", value=self.attributions_table.table_name)
+        cdk.CfnOutput(self, "MarketDataStream", value=self.market_data_stream.stream_name)
 
     # ── Table factories ──
 
@@ -139,6 +153,7 @@ class CoreStack(cdk.Stack):
             encryption_key=self.kms_key,
             point_in_time_recovery=True,
             removal_policy=RemovalPolicy.RETAIN,
+            stream=dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
         )
         table.add_global_secondary_index(
             index_name="symbol-status-index",
@@ -199,6 +214,42 @@ class CoreStack(cdk.Stack):
             encryption_key=self.kms_key,
             removal_policy=RemovalPolicy.RETAIN,
         )
+
+    def _create_attributions_table(self) -> dynamodb.Table:
+        """Signal-to-outcome attribution records."""
+        table = dynamodb.Table(
+            self, "AttributionsTable",
+            table_name=f"{self.prefix}-attributions",
+            partition_key=dynamodb.Attribute(
+                name="correlation_id", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="timestamp", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            encryption=dynamodb.TableEncryption.CUSTOMER_MANAGED,
+            encryption_key=self.kms_key,
+            removal_policy=RemovalPolicy.RETAIN,
+        )
+        table.add_global_secondary_index(
+            index_name="strategy-index",
+            partition_key=dynamodb.Attribute(
+                name="strategy_id", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="timestamp", type=dynamodb.AttributeType.STRING
+            ),
+        )
+        table.add_global_secondary_index(
+            index_name="signal-type-index",
+            partition_key=dynamodb.Attribute(
+                name="signal_type", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="timestamp", type=dynamodb.AttributeType.STRING
+            ),
+        )
+        return table
 
     def _create_events_table(self) -> dynamodb.Table:
         table = dynamodb.Table(
