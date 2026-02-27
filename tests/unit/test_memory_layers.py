@@ -433,3 +433,414 @@ def test_evaluate_detailed_matches_evaluate():
 
     assert detailed["recommendation"] == rec_simple
     assert abs(detailed["confidence"] - conf_simple) < 1e-6
+
+
+# ══════════════════════════════════════════════════
+# EDGE CASE TESTS — Decision Ledger
+# ══════════════════════════════════════════════════
+
+
+def test_decision_step_empty_reasoning(memory):
+    """Empty reasoning dict should be stored without error."""
+    memory.record_decision_step(
+        correlation_id="corr-empty",
+        step_key="analyst",
+        agent="analyst",
+        symbol="AAPL",
+        reasoning={},
+    )
+
+    chain = memory.get_decision_chain("corr-empty")
+    assert len(chain) == 1
+    assert chain[0]["reasoning"] == {}
+
+
+def test_decision_step_nested_reasoning(memory):
+    """Complex nested reasoning dict should survive DynamoDB round-trip."""
+    nested = {
+        "signals": {
+            "rsi": {"value": 25.3, "score": 1.0, "state": "oversold"},
+            "macd": {"value": 0.5, "score": 0.8, "state": "bullish"},
+        },
+        "fingerprint": "rsi=oversold|macd=bullish",
+        "list_data": [1.0, 2.5, 3.7],
+    }
+    memory.record_decision_step(
+        correlation_id="corr-nested",
+        step_key="analyst",
+        agent="analyst",
+        symbol="AAPL",
+        reasoning=nested,
+    )
+
+    chain = memory.get_decision_chain("corr-nested")
+    assert len(chain) == 1
+    r = chain[0]["reasoning"]
+    assert r["signals"]["rsi"]["state"] == "oversold"
+    assert r["list_data"] == [1.0, 2.5, 3.7]
+
+
+def test_decision_step_has_ttl(memory):
+    """Decision steps should have TTL attribute set."""
+    memory.record_decision_step(
+        correlation_id="corr-ttl",
+        step_key="analyst",
+        agent="analyst",
+        symbol="AAPL",
+        reasoning={"test": True},
+    )
+
+    chain = memory.get_decision_chain("corr-ttl")
+    assert len(chain) == 1
+    assert "ttl" in chain[0]
+    assert chain[0]["ttl"] > 0
+
+
+def test_decision_step_without_strategy_id(memory):
+    """Steps without strategy_id should not have the attribute."""
+    memory.record_decision_step(
+        correlation_id="corr-nostrat",
+        step_key="analyst",
+        agent="analyst",
+        symbol="AAPL",
+        reasoning={"test": True},
+    )
+
+    chain = memory.get_decision_chain("corr-nostrat")
+    assert len(chain) == 1
+    # strategy_id should not be present (not in GSI query results either)
+    assert "strategy_id" not in chain[0]
+
+
+def test_get_decision_chain_nonexistent(memory):
+    """Querying non-existent correlation_id returns empty list."""
+    chain = memory.get_decision_chain("does-not-exist")
+    assert chain == []
+
+
+def test_get_decisions_by_symbol_empty(memory):
+    """Querying symbol with no decisions returns empty list."""
+    results = memory.get_decisions_by_symbol("ZZZZ")
+    assert results == []
+
+
+def test_get_decisions_by_strategy_empty(memory):
+    """Querying strategy with no decisions returns empty list."""
+    results = memory.get_decisions_by_strategy("no-such-strategy")
+    assert results == []
+
+
+def test_get_decisions_by_symbol_respects_limit(memory):
+    """Limit parameter should cap the number of results."""
+    for i in range(10):
+        memory.record_decision_step(
+            correlation_id=f"corr-limit-{i}",
+            step_key="analyst",
+            agent="analyst",
+            symbol="AAPL",
+            reasoning={"i": i},
+        )
+
+    results = memory.get_decisions_by_symbol("AAPL", limit=3)
+    assert len(results) == 3
+
+
+# ══════════════════════════════════════════════════
+# EDGE CASE TESTS — Pattern Library
+# ══════════════════════════════════════════════════
+
+
+def test_update_pattern_zero_pnl(memory):
+    """Zero PnL should count as a loss (pnl <= 0)."""
+    memory.update_pattern("AAPL", "rsi=neutral", 0.0, 0.5)
+
+    pattern = memory.get_pattern("AAPL", "rsi=neutral")
+    assert pattern is not None
+    assert pattern["occurrences"] == 1
+    assert pattern["wins"] == 0
+    assert pattern["losses"] == 1
+    assert pattern["total_pnl"] == 0.0
+
+
+def test_update_pattern_negative_pnl(memory):
+    """Negative PnL should count as a loss."""
+    memory.update_pattern("AAPL", "rsi=overbought", -500.0, 0.7)
+
+    pattern = memory.get_pattern("AAPL", "rsi=overbought")
+    assert pattern is not None
+    assert pattern["wins"] == 0
+    assert pattern["losses"] == 1
+    assert pattern["total_pnl"] == -500.0
+
+
+def test_update_pattern_small_positive_pnl(memory):
+    """Even a tiny positive PnL should count as a win."""
+    memory.update_pattern("AAPL", "rsi=neutral", 0.01, 0.5)
+
+    pattern = memory.get_pattern("AAPL", "rsi=neutral")
+    assert pattern["wins"] == 1
+    assert pattern["losses"] == 0
+
+
+def test_get_pattern_nonexistent(memory):
+    """Querying non-existent pattern returns None."""
+    result = memory.get_pattern("AAPL", "does-not-exist")
+    assert result is None
+
+
+def test_get_patterns_for_symbol_empty(memory):
+    """Querying symbol with no patterns returns empty list."""
+    results = memory.get_patterns_for_symbol("ZZZZ")
+    assert results == []
+
+
+def test_get_patterns_min_occurrences_zero(memory):
+    """min_occurrences=0 should return all patterns."""
+    memory.update_pattern("GOOG", "rsi=neutral", 10.0, 0.5)
+
+    results = memory.get_patterns_for_symbol("GOOG", min_occurrences=0)
+    assert len(results) == 1
+
+
+def test_pattern_confidence_accumulates(memory):
+    """avg_confidence should accumulate across updates."""
+    memory.update_pattern("AAPL", "rsi=oversold", 50.0, 0.8)
+    memory.update_pattern("AAPL", "rsi=oversold", 30.0, 0.6)
+
+    pattern = memory.get_pattern("AAPL", "rsi=oversold")
+    assert pattern is not None
+    # avg_confidence accumulates: 0 + 0.8 + 0.6 = 1.4
+    assert abs(pattern["avg_confidence"] - 1.4) < 0.01
+
+
+def test_pattern_last_seen_updates(memory):
+    """last_seen should reflect the most recent update."""
+    memory.update_pattern("AAPL", "rsi=oversold", 50.0, 0.8)
+    first_pattern = memory.get_pattern("AAPL", "rsi=oversold")
+    first_ts = first_pattern["last_seen"]
+
+    memory.update_pattern("AAPL", "rsi=oversold", 30.0, 0.6)
+    second_pattern = memory.get_pattern("AAPL", "rsi=oversold")
+    second_ts = second_pattern["last_seen"]
+
+    assert second_ts >= first_ts
+
+
+# ══════════════════════════════════════════════════
+# EDGE CASE TESTS — Snapshot with market_context
+# ══════════════════════════════════════════════════
+
+
+def test_record_snapshot_without_market_context(memory):
+    """Snapshot without market_context should work (backwards compatible)."""
+    memory.record_snapshot(
+        cash=100000.0,
+        positions_value=0.0,
+        total_value=100000.0,
+        daily_pnl=0.0,
+        open_positions=0,
+    )
+
+    history = memory.get_portfolio_history(days=1)
+    assert len(history) >= 1
+    assert "market_context" not in history[0]
+
+
+def test_record_snapshot_empty_market_context(memory):
+    """Empty market_context dict should not be stored (falsy)."""
+    memory.record_snapshot(
+        cash=100000.0,
+        positions_value=0.0,
+        total_value=100000.0,
+        daily_pnl=0.0,
+        open_positions=0,
+        market_context={},
+    )
+
+    history = memory.get_portfolio_history(days=1)
+    assert len(history) >= 1
+    # Empty dict is falsy, so market_context should not be stored
+    assert "market_context" not in history[0]
+
+
+# ══════════════════════════════════════════════════
+# EDGE CASE TESTS — evaluate_detailed
+# ══════════════════════════════════════════════════
+
+
+def test_evaluate_detailed_empty_indicators():
+    """Empty indicators should return hold with 0 confidence."""
+    ta = TechnicalAnalysisSkill()
+    result = ta.evaluate_detailed({})
+
+    assert result["recommendation"] == "hold"
+    assert result["confidence"] == 0.0
+    # Should still have fingerprint parts for the 4 hardcoded signals
+    assert "rsi=neutral" in result["fingerprint"]
+    assert "macd=neutral" in result["fingerprint"]
+
+
+def test_evaluate_detailed_only_rsi():
+    """Only RSI provided — should still produce valid result."""
+    ta = TechnicalAnalysisSkill()
+    result = ta.evaluate_detailed({"rsi": 20.0})
+
+    assert result["recommendation"] in ("strong_buy", "buy", "hold", "sell", "strong_sell")
+    assert "rsi=oversold" in result["fingerprint"]
+    assert "rsi" in result["signals"]
+
+
+def test_evaluate_detailed_sma_missing():
+    """Missing SMA 50/200 should not appear in signals or fingerprint."""
+    ta = TechnicalAnalysisSkill()
+    result = ta.evaluate_detailed({
+        "rsi": 50.0,
+        "macd_histogram": 0.0,
+        "bb_pct_b": 0.5,
+        "ema_crossover": 0.0,
+    })
+
+    assert "sma" not in result["signals"]
+    assert "sma=" not in result["fingerprint"]
+
+
+def test_evaluate_detailed_sma_golden_cross():
+    """SMA golden cross should appear in signals and fingerprint."""
+    ta = TechnicalAnalysisSkill()
+    result = ta.evaluate_detailed({
+        "rsi": 50.0,
+        "macd_histogram": 0.0,
+        "bb_pct_b": 0.5,
+        "ema_crossover": 0.0,
+        "sma_50": 200.0,
+        "sma_200": 180.0,
+    })
+
+    assert "sma" in result["signals"]
+    assert result["signals"]["sma"]["state"] == "golden"
+    assert "sma=golden" in result["fingerprint"]
+
+
+def test_evaluate_detailed_sma_death_cross():
+    """SMA death cross should appear in signals and fingerprint."""
+    ta = TechnicalAnalysisSkill()
+    result = ta.evaluate_detailed({
+        "rsi": 50.0,
+        "macd_histogram": 0.0,
+        "bb_pct_b": 0.5,
+        "ema_crossover": 0.0,
+        "sma_50": 180.0,
+        "sma_200": 200.0,
+    })
+
+    assert result["signals"]["sma"]["state"] == "death"
+    assert "sma=death" in result["fingerprint"]
+
+
+def test_evaluate_detailed_stoch_rsi_none():
+    """stoch_rsi_k=None should be excluded from signals."""
+    ta = TechnicalAnalysisSkill()
+    result = ta.evaluate_detailed({"rsi": 50.0})
+
+    assert "stoch_rsi" not in result["signals"]
+    assert "stoch_rsi=" not in result["fingerprint"]
+
+
+def test_evaluate_detailed_stoch_rsi_zero():
+    """stoch_rsi_k=0.0 is a value (not None) — should be 'oversold'."""
+    ta = TechnicalAnalysisSkill()
+    result = ta.evaluate_detailed({"stoch_rsi_k": 0.0})
+
+    assert "stoch_rsi" in result["signals"]
+    assert result["signals"]["stoch_rsi"]["state"] == "oversold"
+
+
+def test_evaluate_detailed_mfi_none():
+    """mfi=None should be excluded from signals."""
+    ta = TechnicalAnalysisSkill()
+    result = ta.evaluate_detailed({"rsi": 50.0})
+
+    assert "mfi" not in result["signals"]
+
+
+def test_evaluate_detailed_mfi_boundaries():
+    """MFI at exact boundaries."""
+    ta = TechnicalAnalysisSkill()
+
+    # At boundary: mfi=20 should be neutral (not < 20)
+    result = ta.evaluate_detailed({"mfi": 20.0})
+    assert result["signals"]["mfi"]["state"] == "neutral"
+
+    # Just below: mfi=19 should be oversold
+    result = ta.evaluate_detailed({"mfi": 19.0})
+    assert result["signals"]["mfi"]["state"] == "oversold"
+
+    # At boundary: mfi=80 should be neutral (not > 80)
+    result = ta.evaluate_detailed({"mfi": 80.0})
+    assert result["signals"]["mfi"]["state"] == "neutral"
+
+    # Just above: mfi=81 should be overbought
+    result = ta.evaluate_detailed({"mfi": 81.0})
+    assert result["signals"]["mfi"]["state"] == "overbought"
+
+
+def test_evaluate_detailed_extreme_rsi():
+    """RSI at extreme values (0 and 100)."""
+    ta = TechnicalAnalysisSkill()
+
+    result = ta.evaluate_detailed({"rsi": 0.0})
+    assert result["signals"]["rsi"]["state"] == "oversold"
+
+    result = ta.evaluate_detailed({"rsi": 100.0})
+    assert result["signals"]["rsi"]["state"] == "overbought"
+
+
+def test_evaluate_detailed_high_volume_amplifies():
+    """Volume ratio > 2.0 should amplify score."""
+    ta = TechnicalAnalysisSkill()
+    indicators_low_vol = {"rsi": 25.0, "volume_ratio": 1.0}
+    indicators_high_vol = {"rsi": 25.0, "volume_ratio": 3.0}
+
+    result_low = ta.evaluate_detailed(indicators_low_vol)
+    result_high = ta.evaluate_detailed(indicators_high_vol)
+
+    # High volume should produce higher absolute score
+    assert abs(result_high["score"]) >= abs(result_low["score"])
+
+
+def test_evaluate_detailed_fingerprint_deterministic():
+    """Same indicators should always produce same fingerprint."""
+    ta = TechnicalAnalysisSkill()
+    indicators = {
+        "rsi": 25.0,
+        "macd_histogram": 0.5,
+        "bb_pct_b": 0.05,
+        "ema_crossover": 1.0,
+        "stoch_rsi_k": 0.15,
+        "mfi": 18.0,
+    }
+
+    fp1 = ta.evaluate_detailed(indicators)["fingerprint"]
+    fp2 = ta.evaluate_detailed(indicators)["fingerprint"]
+
+    assert fp1 == fp2
+
+
+def test_evaluate_detailed_all_bearish():
+    """All bearish signals should produce strong_sell or sell."""
+    ta = TechnicalAnalysisSkill()
+    indicators = {
+        "rsi": 80.0,
+        "macd_histogram": -1.0,
+        "bb_pct_b": 0.95,
+        "ema_crossover": -1.0,
+        "sma_50": 180.0,
+        "sma_200": 200.0,
+        "stoch_rsi_k": 0.9,
+        "mfi": 85.0,
+    }
+
+    result = ta.evaluate_detailed(indicators)
+    assert result["recommendation"] in ("sell", "strong_sell")
+    assert result["signals"]["rsi"]["state"] == "overbought"
+    assert result["signals"]["macd"]["state"] == "bearish"
