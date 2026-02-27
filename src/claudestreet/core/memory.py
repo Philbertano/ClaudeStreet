@@ -65,6 +65,8 @@ class DynamoMemory:
         strategies_table: str | None = None,
         snapshots_table: str | None = None,
         events_table: str | None = None,
+        decisions_table: str | None = None,
+        patterns_table: str | None = None,
         region: str | None = None,
     ) -> None:
         region = region or os.environ.get("AWS_REGION", "us-east-1")
@@ -81,6 +83,12 @@ class DynamoMemory:
         )
         self._events = dynamodb.Table(
             events_table or os.environ.get("EVENTS_TABLE", "claudestreet-events")
+        )
+        self._decisions = dynamodb.Table(
+            decisions_table or os.environ.get("DECISIONS_TABLE", "claudestreet-decisions")
+        )
+        self._patterns = dynamodb.Table(
+            patterns_table or os.environ.get("PATTERNS_TABLE", "claudestreet-patterns")
         )
 
     # ──────────────────────────────────────────────
@@ -257,9 +265,10 @@ class DynamoMemory:
         daily_pnl: float,
         open_positions: int,
         snapshot_id: str | None = None,
+        market_context: dict | None = None,
     ) -> None:
         now = datetime.now(timezone.utc)
-        item = {
+        item: dict[str, Any] = {
             "date": now.strftime("%Y-%m-%d"),
             "timestamp": now.isoformat(),
             "snapshot_id": snapshot_id or f"snap-{now.strftime('%Y%m%d%H%M%S')}",
@@ -269,6 +278,8 @@ class DynamoMemory:
             "daily_pnl": daily_pnl,
             "open_positions": open_positions,
         }
+        if market_context:
+            item["market_context"] = market_context
         self._snapshots.put_item(Item=_to_decimal(item))
 
     def get_portfolio_history(self, days: int = 30) -> list[dict]:
@@ -395,3 +406,137 @@ class DynamoMemory:
                 break
             scan_kwargs["ExclusiveStartKey"] = last_key
         return {item["symbol"]: item["epic"] for item in items if "symbol" in item and "epic" in item}
+
+    # ──────────────────────────────────────────────
+    # Decision Ledger
+    # ──────────────────────────────────────────────
+
+    def record_decision_step(
+        self,
+        correlation_id: str | None,
+        step_key: str,
+        agent: str,
+        symbol: str,
+        reasoning: dict,
+        strategy_id: str | None = None,
+    ) -> None:
+        """Record a single agent's reasoning step in the decision ledger.
+
+        Idempotent: skips duplicate writes for the same correlation_id + step_key.
+        """
+        if not correlation_id:
+            return
+
+        now = datetime.now(timezone.utc)
+        ttl = int(now.timestamp()) + (90 * 86400)  # 90 day TTL
+
+        item: dict[str, Any] = {
+            "correlation_id": correlation_id,
+            "step_key": step_key,
+            "agent": agent,
+            "symbol": symbol,
+            "timestamp": now.isoformat(),
+            "reasoning": reasoning,
+            "ttl": ttl,
+        }
+        if strategy_id:
+            item["strategy_id"] = strategy_id
+
+        try:
+            self._decisions.put_item(
+                Item=_to_decimal(item),
+                ConditionExpression=Attr("correlation_id").not_exists(),
+            )
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                logger.debug("Duplicate decision step %s/%s, skipping", correlation_id, step_key)
+            else:
+                raise
+
+    def get_decision_chain(self, correlation_id: str) -> list[dict]:
+        """Get all decision steps for a correlation_id in chronological order."""
+        response = self._decisions.query(
+            KeyConditionExpression=Key("correlation_id").eq(correlation_id),
+            ScanIndexForward=True,
+        )
+        return [_from_decimal(item) for item in response.get("Items", [])]
+
+    def get_decisions_by_symbol(self, symbol: str, limit: int = 50) -> list[dict]:
+        """Get recent decisions for a symbol (most recent first)."""
+        response = self._decisions.query(
+            IndexName="symbol-index",
+            KeyConditionExpression=Key("symbol").eq(symbol),
+            ScanIndexForward=False,
+            Limit=limit,
+        )
+        return [_from_decimal(item) for item in response.get("Items", [])]
+
+    def get_decisions_by_strategy(self, strategy_id: str, limit: int = 50) -> list[dict]:
+        """Get recent decisions for a strategy (most recent first)."""
+        response = self._decisions.query(
+            IndexName="strategy-index",
+            KeyConditionExpression=Key("strategy_id").eq(strategy_id),
+            ScanIndexForward=False,
+            Limit=limit,
+        )
+        return [_from_decimal(item) for item in response.get("Items", [])]
+
+    # ──────────────────────────────────────────────
+    # Pattern Library
+    # ──────────────────────────────────────────────
+
+    def update_pattern(
+        self,
+        symbol: str,
+        fingerprint: str,
+        pnl: float,
+        confidence: float,
+    ) -> None:
+        """Atomically update pattern win/loss/pnl counters."""
+        pattern_key = f"{symbol}:{fingerprint}"
+        now = datetime.now(timezone.utc)
+        is_win = 1 if pnl > 0 else 0
+        is_loss = 1 if pnl <= 0 else 0
+
+        self._patterns.update_item(
+            Key={"pattern_key": pattern_key},
+            UpdateExpression=(
+                "ADD occurrences :one, wins :win, losses :loss, total_pnl :pnl "
+                "SET symbol = :sym, fingerprint = :fp, last_seen = :ts, "
+                "avg_confidence = if_not_exists(avg_confidence, :zero) + :conf_delta"
+            ),
+            ExpressionAttributeValues=_to_decimal({
+                ":one": 1,
+                ":win": is_win,
+                ":loss": is_loss,
+                ":pnl": pnl,
+                ":sym": symbol,
+                ":fp": fingerprint,
+                ":ts": now.isoformat(),
+                ":zero": 0,
+                ":conf_delta": confidence,
+            }),
+        )
+
+    def get_pattern(self, symbol: str, fingerprint: str) -> dict | None:
+        """Get a specific pattern by symbol and fingerprint."""
+        pattern_key = f"{symbol}:{fingerprint}"
+        response = self._patterns.get_item(Key={"pattern_key": pattern_key})
+        item = response.get("Item")
+        return _from_decimal(item) if item else None
+
+    def get_patterns_for_symbol(
+        self, symbol: str, min_occurrences: int = 5
+    ) -> list[dict]:
+        """Get patterns for a symbol with minimum occurrence threshold."""
+        response = self._patterns.query(
+            IndexName="symbol-index",
+            KeyConditionExpression=Key("symbol").eq(symbol),
+            ScanIndexForward=False,
+        )
+        results = []
+        for item in response.get("Items", []):
+            item = _from_decimal(item)
+            if item.get("occurrences", 0) >= min_occurrences:
+                results.append(item)
+        return results

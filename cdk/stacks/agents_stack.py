@@ -202,6 +202,7 @@ class AgentsStack(cdk.Stack):
             core.trades_table, core.strategies_table,
             core.snapshots_table, core.events_table,
             core.attributions_table,
+            core.decisions_table, core.patterns_table,
         ]:
             table.grant_read_write_data(role)
 
@@ -255,6 +256,8 @@ class AgentsStack(cdk.Stack):
                 "EVENTS_TABLE": self.core.events_table.table_name,
                 "SESSION_BUCKET": self.core.session_bucket.bucket_name,
                 "KINESIS_STREAM": self.core.market_data_stream.stream_name,
+                "DECISIONS_TABLE": self.core.decisions_table.table_name,
+                "PATTERNS_TABLE": self.core.patterns_table.table_name,
                 "LOG_LEVEL": "INFO",
             },
             dead_letter_queue=self.dlq,
@@ -509,6 +512,7 @@ class AgentsStack(cdk.Stack):
         for table in [
             core.trades_table, core.strategies_table,
             core.snapshots_table, core.events_table,
+            core.decisions_table, core.patterns_table,
         ]:
             table.grant_read_write_data(task_role)
 
@@ -546,6 +550,8 @@ class AgentsStack(cdk.Stack):
                 "SNAPSHOTS_TABLE": core.snapshots_table.table_name,
                 "EVENTS_TABLE": core.events_table.table_name,
                 "SESSION_BUCKET": core.session_bucket.bucket_name,
+                "DECISIONS_TABLE": core.decisions_table.table_name,
+                "PATTERNS_TABLE": core.patterns_table.table_name,
                 "LOG_LEVEL": "INFO",
             },
             secrets={

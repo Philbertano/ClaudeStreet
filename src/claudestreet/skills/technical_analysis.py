@@ -235,6 +235,182 @@ class TechnicalAnalysisSkill:
             return "sell", confidence
         return "hold", confidence
 
+    def evaluate_detailed(
+        self, indicators: dict[str, float], params: dict[str, float] | None = None
+    ) -> dict:
+        """Full signal breakdown with condition fingerprint.
+
+        Returns dict with recommendation, confidence, score, per-signal
+        details, and a deterministic fingerprint string.
+        """
+        p = params or {}
+        score = 0.0
+        signals = 0
+        signal_details: dict[str, dict] = {}
+        fingerprint_parts: list[str] = []
+
+        # RSI
+        rsi = indicators.get("rsi", 50)
+        oversold = p.get("rsi_oversold", 30)
+        overbought = p.get("rsi_overbought", 70)
+        if rsi < oversold:
+            rsi_score = 1.0
+            rsi_state = "oversold"
+        elif rsi > overbought:
+            rsi_score = -1.0
+            rsi_state = "overbought"
+        else:
+            rsi_score = 0.0
+            rsi_state = "neutral"
+        score += rsi_score
+        signals += 1
+        signal_details["rsi"] = {"value": rsi, "score": rsi_score, "state": rsi_state}
+        fingerprint_parts.append(f"rsi={rsi_state}")
+
+        # MACD
+        macd_hist = indicators.get("macd_histogram", 0)
+        if macd_hist > 0:
+            macd_score = 0.8
+            macd_state = "bullish"
+        elif macd_hist < 0:
+            macd_score = -0.8
+            macd_state = "bearish"
+        else:
+            macd_score = 0.0
+            macd_state = "neutral"
+        score += macd_score
+        signals += 1
+        signal_details["macd"] = {"value": macd_hist, "score": macd_score, "state": macd_state}
+        fingerprint_parts.append(f"macd={macd_state}")
+
+        # Bollinger Band
+        bb_pct = indicators.get("bb_pct_b", 0.5)
+        if bb_pct < 0.1:
+            bb_score = 0.7
+            bb_state = "lower"
+        elif bb_pct > 0.9:
+            bb_score = -0.7
+            bb_state = "upper"
+        else:
+            bb_score = 0.0
+            bb_state = "mid"
+        score += bb_score
+        signals += 1
+        signal_details["bb"] = {"value": bb_pct, "score": bb_score, "state": bb_state}
+        fingerprint_parts.append(f"bb={bb_state}")
+
+        # EMA crossover
+        ema_cross = indicators.get("ema_crossover", 0)
+        ema_score = ema_cross * 0.6
+        if ema_cross > 0:
+            ema_state = "bullish"
+        elif ema_cross < 0:
+            ema_state = "bearish"
+        else:
+            ema_state = "neutral"
+        score += ema_score
+        signals += 1
+        signal_details["ema"] = {"value": ema_cross, "score": ema_score, "state": ema_state}
+        fingerprint_parts.append(f"ema={ema_state}")
+
+        # Volume confirmation (amplifier, not a signal count)
+        vol_ratio = indicators.get("volume_ratio", 1.0)
+        if vol_ratio > 2.0:
+            score *= 1.2
+
+        # SMA 50/200
+        sma_50 = indicators.get("sma_50")
+        sma_200 = indicators.get("sma_200")
+        if sma_50 and sma_200:
+            if sma_50 > sma_200:
+                sma_score = 0.4
+                sma_state = "golden"
+            else:
+                sma_score = -0.4
+                sma_state = "death"
+            score += sma_score
+            signals += 1
+            signal_details["sma"] = {"value": sma_50 - sma_200, "score": sma_score, "state": sma_state}
+            fingerprint_parts.append(f"sma={sma_state}")
+
+        # Stochastic RSI
+        stoch_k = indicators.get("stoch_rsi_k")
+        if stoch_k is not None:
+            if stoch_k < 0.2:
+                stoch_score = 0.5
+                stoch_state = "oversold"
+            elif stoch_k > 0.8:
+                stoch_score = -0.5
+                stoch_state = "overbought"
+            else:
+                stoch_score = 0.0
+                stoch_state = "neutral"
+            score += stoch_score
+            signals += 1
+            signal_details["stoch_rsi"] = {"value": stoch_k, "score": stoch_score, "state": stoch_state}
+            fingerprint_parts.append(f"stoch_rsi={stoch_state}")
+
+        # MFI
+        mfi = indicators.get("mfi")
+        if mfi is not None:
+            if mfi < 20:
+                mfi_score = 0.4
+                mfi_state = "oversold"
+            elif mfi > 80:
+                mfi_score = -0.4
+                mfi_state = "overbought"
+            else:
+                mfi_score = 0.0
+                mfi_state = "neutral"
+            score += mfi_score
+            signals += 1
+            signal_details["mfi"] = {"value": mfi, "score": mfi_score, "state": mfi_state}
+            fingerprint_parts.append(f"mfi={mfi_state}")
+
+        # Volume-price divergence
+        vpd = indicators.get("volume_price_divergence", 0)
+        if vpd < -0.5:
+            score -= 0.3
+            signals += 1
+
+        # Relative strength vs SPY
+        rs = indicators.get("relative_strength_spy")
+        if rs is not None:
+            score += rs * 0.3
+            signals += 1
+
+        # Normalize
+        if signals == 0:
+            return {
+                "recommendation": "hold",
+                "confidence": 0.0,
+                "score": 0.0,
+                "signals": signal_details,
+                "fingerprint": "|".join(fingerprint_parts),
+            }
+
+        avg_score = score / signals
+        confidence = min(abs(avg_score), 1.0)
+
+        if avg_score > 0.6:
+            recommendation = "strong_buy"
+        elif avg_score > 0.2:
+            recommendation = "buy"
+        elif avg_score < -0.6:
+            recommendation = "strong_sell"
+        elif avg_score < -0.2:
+            recommendation = "sell"
+        else:
+            recommendation = "hold"
+
+        return {
+            "recommendation": recommendation,
+            "confidence": confidence,
+            "score": round(avg_score, 6),
+            "signals": signal_details,
+            "fingerprint": "|".join(fingerprint_parts),
+        }
+
     def summarize(
         self, symbol: str, indicators: dict[str, float], recommendation: str
     ) -> str:

@@ -184,13 +184,18 @@ class RiskGuardAgent(BaseAgent):
     def _validate(self, event: Event) -> list[Event]:
         proposal = TradeProposalPayload(**event.payload)
         rejections: list[str] = []
+        checks: dict[str, dict] = {}
         capital = self.config.get("initial_capital", 100000.0)
         now = datetime.now(timezone.utc)
 
         # 1. Position size
         position_value = proposal.entry_price * proposal.quantity
         max_pos_pct = self.config.get("max_position_pct", 0.15)
-        if position_value > capital * max_pos_pct:
+        pos_passed = position_value <= capital * max_pos_pct
+        checks["position_size"] = {
+            "value": position_value, "limit": capital * max_pos_pct, "passed": pos_passed,
+        }
+        if not pos_passed:
             rejections.append(
                 f"Position ${position_value:,.0f} exceeds {max_pos_pct:.0%} limit"
             )
@@ -198,58 +203,96 @@ class RiskGuardAgent(BaseAgent):
         # 2. Existing exposure to same symbol
         open_trades = self.memory.get_open_trades(proposal.symbol)
         existing = sum(t.get("entry_price", 0) * t.get("quantity", 0) for t in open_trades)
-        if existing + position_value > capital * max_pos_pct:
+        sym_passed = existing + position_value <= capital * max_pos_pct
+        checks["symbol_exposure"] = {
+            "existing": existing, "new": position_value, "passed": sym_passed,
+        }
+        if not sym_passed:
             rejections.append(f"Combined {proposal.symbol} exposure exceeds limit")
 
         # 3. Max open positions
         all_open = self.memory.get_open_trades()
         max_pos = self.config.get("max_positions", 10)
-        if len(all_open) >= max_pos and not open_trades:
+        max_pos_passed = len(all_open) < max_pos or bool(open_trades)
+        checks["max_positions"] = {
+            "count": len(all_open), "limit": max_pos, "passed": max_pos_passed,
+        }
+        if not max_pos_passed:
             rejections.append(f"Max {max_pos} positions reached")
 
         # 4. Stop loss required
-        if proposal.stop_loss <= 0:
+        sl_passed = proposal.stop_loss > 0
+        checks["stop_loss"] = {"value": proposal.stop_loss, "passed": sl_passed}
+        if not sl_passed:
             rejections.append("No stop loss defined")
 
         # 5. Risk/reward >= 1.5
         risk = abs(proposal.entry_price - proposal.stop_loss)
         reward = abs(proposal.take_profit - proposal.entry_price)
-        if risk > 0 and reward / risk < 1.5:
-            rejections.append(f"R:R {reward/risk:.2f} below 1.5 minimum")
+        rr_ratio = reward / risk if risk > 0 else 0
+        rr_passed = risk <= 0 or rr_ratio >= 1.5
+        checks["risk_reward"] = {"ratio": round(rr_ratio, 2), "min": 1.5, "passed": rr_passed}
+        if risk > 0 and not rr_passed:
+            rejections.append(f"R:R {rr_ratio:.2f} below 1.5 minimum")
 
         # 6. Restricted hours (US Eastern, where the market operates)
         eastern = now.astimezone(ZoneInfo("America/New_York"))
         current_time = eastern.strftime("%H:%M")
+        hours_passed = True
         for window in self.config.get("restricted_hours", []):
             parts = window.split("-")
             if len(parts) == 2 and parts[0] <= current_time <= parts[1]:
                 rejections.append(f"Restricted window {window}")
+                hours_passed = False
+        checks["restricted_hours"] = {"current_time": current_time, "passed": hours_passed}
 
         # 7. Portfolio heat check
         heat_rejection = self._check_portfolio_heat(proposal, all_open, capital)
+        checks["portfolio_heat"] = {"passed": heat_rejection is None}
         if heat_rejection:
             rejections.append(heat_rejection)
 
         # 8. Correlation check
         corr_rejection = self._check_correlation(proposal, all_open)
+        checks["correlation"] = {"passed": corr_rejection is None}
         if corr_rejection:
             rejections.append(corr_rejection)
+
+        approved = len(rejections) == 0
 
         if rejections:
             logger.info("[risk_guard] REJECTED %s %s: %s",
                         proposal.side, proposal.symbol, "; ".join(rejections))
-            return [self.emit(
+            result = [self.emit(
                 EventType.RISK_REJECTED,
                 payload={**proposal.model_dump(), "rejections": rejections},
                 parent=event,
                 priority=EventPriority.HIGH,
             )]
+        else:
+            logger.info("[risk_guard] APPROVED %s %.2f %s @ %.2f",
+                         proposal.side, proposal.quantity, proposal.symbol, proposal.entry_price)
+            result = [self.emit(
+                EventType.RISK_APPROVED,
+                payload=proposal.model_dump(),
+                parent=event,
+                priority=EventPriority.HIGH,
+            )]
 
-        logger.info("[risk_guard] APPROVED %s %.2f %s @ %.2f",
-                     proposal.side, proposal.quantity, proposal.symbol, proposal.entry_price)
-        return [self.emit(
-            EventType.RISK_APPROVED,
-            payload=proposal.model_dump(),
-            parent=event,
-            priority=EventPriority.HIGH,
-        )]
+        try:
+            self.memory.record_decision_step(
+                correlation_id=event.correlation_id,
+                step_key="risk_guard",
+                agent=self.agent_id,
+                symbol=proposal.symbol,
+                strategy_id=proposal.strategy_id,
+                reasoning={
+                    "approved": approved,
+                    "checks": checks,
+                    "rejections": rejections,
+                },
+            )
+        except Exception:
+            logger.debug("Failed to record risk_guard decision step", exc_info=True)
+
+        return result

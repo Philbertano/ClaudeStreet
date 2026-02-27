@@ -76,7 +76,9 @@ class AnalystAgent(BaseAgent):
                 return []
 
             indicators = ta_skill.compute_indicators(hist)
-            recommendation, confidence = ta_skill.evaluate(indicators)
+            detailed = ta_skill.evaluate_detailed(indicators)
+            recommendation = detailed["recommendation"]
+            confidence = detailed["confidence"]
 
             analysis = AnalysisPayload(
                 symbol=symbol,
@@ -87,11 +89,30 @@ class AnalystAgent(BaseAgent):
             )
 
             if recommendation in ("strong_buy", "buy", "strong_sell", "sell"):
-                return [self.emit(
+                result = [self.emit(
                     EventType.ANALYSIS_COMPLETE,
                     payload=analysis.model_dump(),
                     parent=parent_event,
                 )]
+
+                try:
+                    self.memory.record_decision_step(
+                        correlation_id=parent_event.correlation_id if parent_event else None,
+                        step_key="analyst",
+                        agent=self.agent_id,
+                        symbol=symbol,
+                        reasoning={
+                            "signals": detailed["signals"],
+                            "fingerprint": detailed["fingerprint"],
+                            "score": detailed["score"],
+                            "recommendation": recommendation,
+                            "confidence": confidence,
+                        },
+                    )
+                except Exception:
+                    logger.debug("Failed to record analyst decision step", exc_info=True)
+
+                return result
         except Exception:
             logger.exception("Analysis failed for %s", symbol)
 

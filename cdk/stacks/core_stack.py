@@ -63,6 +63,8 @@ class CoreStack(cdk.Stack):
         self.snapshots_table = self._create_snapshots_table()
         self.events_table = self._create_events_table()
         self.attributions_table = self._create_attributions_table()
+        self.decisions_table = self._create_decisions_table()
+        self.patterns_table = self._create_patterns_table()
 
         # ── S3 bucket for sessions and evolution archives ──
         self.session_bucket = s3.Bucket(
@@ -137,6 +139,8 @@ class CoreStack(cdk.Stack):
         cdk.CfnOutput(self, "StrategiesTableOutput", value=self.strategies_table.table_name)
         cdk.CfnOutput(self, "SessionBucketOutput", value=self.session_bucket.bucket_name)
         cdk.CfnOutput(self, "AttributionsTableOutput", value=self.attributions_table.table_name)
+        cdk.CfnOutput(self, "DecisionsTableOutput", value=self.decisions_table.table_name)
+        cdk.CfnOutput(self, "PatternsTableOutput", value=self.patterns_table.table_name)
         cdk.CfnOutput(self, "MarketDataStreamOutput", value=self.market_data_stream.stream_name)
 
     # ── Table factories ──
@@ -274,6 +278,67 @@ class CoreStack(cdk.Stack):
             ),
             sort_key=dynamodb.Attribute(
                 name="timestamp", type=dynamodb.AttributeType.STRING
+            ),
+        )
+        return table
+
+    def _create_decisions_table(self) -> dynamodb.Table:
+        """Decision ledger — structured reasoning record per trade pipeline step."""
+        table = dynamodb.Table(
+            self, "DecisionsTable",
+            table_name=f"{self.prefix}-decisions",
+            partition_key=dynamodb.Attribute(
+                name="correlation_id", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="step_key", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            encryption=dynamodb.TableEncryption.CUSTOMER_MANAGED,
+            encryption_key=self.kms_key,
+            time_to_live_attribute="ttl",
+            removal_policy=RemovalPolicy.RETAIN,
+        )
+        table.add_global_secondary_index(
+            index_name="symbol-index",
+            partition_key=dynamodb.Attribute(
+                name="symbol", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="timestamp", type=dynamodb.AttributeType.STRING
+            ),
+        )
+        table.add_global_secondary_index(
+            index_name="strategy-index",
+            partition_key=dynamodb.Attribute(
+                name="strategy_id", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="timestamp", type=dynamodb.AttributeType.STRING
+            ),
+        )
+        return table
+
+    def _create_patterns_table(self) -> dynamodb.Table:
+        """Pattern library — conditional performance tracking."""
+        table = dynamodb.Table(
+            self, "PatternsTable",
+            table_name=f"{self.prefix}-patterns",
+            partition_key=dynamodb.Attribute(
+                name="pattern_key", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            encryption=dynamodb.TableEncryption.CUSTOMER_MANAGED,
+            encryption_key=self.kms_key,
+            removal_policy=RemovalPolicy.RETAIN,
+        )
+        table.add_global_secondary_index(
+            index_name="symbol-index",
+            partition_key=dynamodb.Attribute(
+                name="symbol", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="occurrences", type=dynamodb.AttributeType.NUMBER
             ),
         )
         return table

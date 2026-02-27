@@ -48,7 +48,7 @@ class ChroniclerAgent(BaseAgent):
         return []
 
     def heartbeat(self) -> list[Event]:
-        """Generate portfolio snapshot."""
+        """Generate portfolio snapshot with market context."""
         open_trades = self.memory.get_open_trades()
         capital = self.config.get("initial_capital", 100000.0)
 
@@ -60,12 +60,15 @@ class ChroniclerAgent(BaseAgent):
         cash = capital - invested
         total_value = cash + positions_value
 
+        market_context = self._gather_market_context(open_trades, capital)
+
         self.memory.record_snapshot(
             cash=round(cash, 2),
             positions_value=round(positions_value, 2),
             total_value=round(total_value, 2),
             daily_pnl=0.0,
             open_positions=len(open_trades),
+            market_context=market_context,
         )
 
         logger.info("[chronicler] Snapshot: value=%.2f positions=%d",
@@ -94,6 +97,7 @@ class ChroniclerAgent(BaseAgent):
         pnl = event.payload.get("pnl", 0.0)
         strategy_id = event.payload.get("strategy_id", "")
         signal_id = event.payload.get("signal_id", "")
+        symbol = event.payload.get("symbol", "")
 
         if trade_id:
             self.memory.record_trade_close(trade_id, exit_price, pnl)
@@ -101,6 +105,28 @@ class ChroniclerAgent(BaseAgent):
         logger.info("[chronicler] Closed: pnl=%.2f strategy=%s", pnl, strategy_id)
 
         events: list[Event] = []
+
+        # Record outcome decision step
+        try:
+            self.memory.record_decision_step(
+                correlation_id=event.correlation_id,
+                step_key="chronicler:outcome",
+                agent=self.agent_id,
+                symbol=symbol,
+                strategy_id=strategy_id,
+                reasoning={
+                    "pnl": pnl,
+                    "exit_price": exit_price,
+                    "entry_price": event.payload.get("entry_price", 0),
+                    "trade_id": trade_id,
+                },
+            )
+        except Exception:
+            logger.debug("Failed to record chronicler outcome step", exc_info=True)
+
+        # Update pattern library
+        if event.correlation_id and symbol:
+            self._update_pattern_from_decision(event.correlation_id, symbol, pnl)
 
         # Signal-to-outcome attribution
         if strategy_id and event.correlation_id:
@@ -111,6 +137,47 @@ class ChroniclerAgent(BaseAgent):
             events.extend(self._update_strategy_fitness(strategy_id, pnl))
 
         return events
+
+    def _update_pattern_from_decision(
+        self, correlation_id: str, symbol: str, pnl: float
+    ) -> None:
+        """Look up the analyst decision step and update the pattern library."""
+        try:
+            chain = self.memory.get_decision_chain(correlation_id)
+            for step in chain:
+                if step.get("step_key") == "analyst":
+                    reasoning = step.get("reasoning", {})
+                    fingerprint = reasoning.get("fingerprint", "")
+                    confidence = reasoning.get("confidence", 0.5)
+                    if fingerprint:
+                        self.memory.update_pattern(symbol, fingerprint, pnl, confidence)
+                    break
+        except Exception:
+            logger.debug("Failed to update pattern library", exc_info=True)
+
+    def _gather_market_context(
+        self, open_trades: list[dict], capital: float
+    ) -> dict:
+        """Gather current market context for snapshot enrichment."""
+        regime = ""
+        try:
+            regime = self.memory.get_current_regime()
+        except Exception:
+            pass
+
+        long_count = sum(1 for t in open_trades if t.get("side") == "buy")
+        short_count = sum(1 for t in open_trades if t.get("side") == "sell")
+        total_exposure = sum(
+            t.get("entry_price", 0) * t.get("quantity", 0) for t in open_trades
+        )
+        exposure_pct = round(total_exposure / capital, 4) if capital > 0 else 0
+
+        return {
+            "regime": regime,
+            "long_count": long_count,
+            "short_count": short_count,
+            "total_exposure_pct": exposure_pct,
+        }
 
     def _record_attribution(
         self,

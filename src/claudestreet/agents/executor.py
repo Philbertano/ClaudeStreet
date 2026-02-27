@@ -68,6 +68,25 @@ class ExecutorAgent(BaseAgent):
         logger.info("[executor] PAPER %s %.2f %s @ %.2f",
                      proposal.side, proposal.quantity, proposal.symbol, proposal.entry_price)
 
+        try:
+            self.memory.record_decision_step(
+                correlation_id=parent.correlation_id,
+                step_key="executor",
+                agent=self.agent_id,
+                symbol=proposal.symbol,
+                strategy_id=proposal.strategy_id,
+                reasoning={
+                    "order_id": order_id,
+                    "fill_price": proposal.entry_price,
+                    "expected_price": proposal.entry_price,
+                    "slippage_bps": 0.0,
+                    "status": "filled",
+                    "paper_trading": True,
+                },
+            )
+        except Exception:
+            logger.debug("Failed to record executor decision step", exc_info=True)
+
         return [self.emit(
             EventType.TRADE_EXECUTED,
             payload={
@@ -140,6 +159,29 @@ class ExecutorAgent(BaseAgent):
                     "fill_price": fill_price,
                     "filled_qty": result.get("filled_qty", 0),
                 })
+
+                try:
+                    slippage_bps = (
+                        round((fill_price - proposal.entry_price) / proposal.entry_price * 10000, 2)
+                        if proposal.entry_price > 0 else 0.0
+                    )
+                    self.memory.record_decision_step(
+                        correlation_id=parent.correlation_id,
+                        step_key="executor",
+                        agent=self.agent_id,
+                        symbol=proposal.symbol,
+                        strategy_id=proposal.strategy_id,
+                        reasoning={
+                            "order_id": result.get("order_id", ""),
+                            "fill_price": fill_price,
+                            "expected_price": proposal.entry_price,
+                            "slippage_bps": slippage_bps,
+                            "status": result.get("status", ""),
+                            "paper_trading": False,
+                        },
+                    )
+                except Exception:
+                    logger.debug("Failed to record executor decision step", exc_info=True)
 
                 return [self.emit(
                     EventType.TRADE_EXECUTED,

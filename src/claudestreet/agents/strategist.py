@@ -100,15 +100,14 @@ class StrategistAgent(BaseAgent):
 
     def _select_strategies_thompson(
         self, strategies: list[Strategy], k: int = 3
-    ) -> list[Strategy]:
+    ) -> list[tuple[float, Strategy]]:
         """Select top-K strategies using Thompson Sampling.
 
         For each strategy, sample from Beta(wins+1, losses+1).
         Select the top-K by sampled value.
-        """
-        if len(strategies) <= k:
-            return strategies
 
+        Returns list of (thompson_score, Strategy) tuples.
+        """
         scored = []
         for s in strategies:
             # Beta distribution: higher wins → higher expected sample
@@ -116,7 +115,9 @@ class StrategistAgent(BaseAgent):
             scored.append((sample, s))
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        return [s for _, s in scored[:k]]
+        if len(scored) <= k:
+            return scored
+        return scored[:k]
 
     def _filter_by_regime(self, strategies: list[Strategy]) -> list[Strategy]:
         """Filter strategies by current market regime."""
@@ -144,12 +145,14 @@ class StrategistAgent(BaseAgent):
         stop_loss: float,
         confidence: float,
         capital: float,
-    ) -> int:
+    ) -> tuple[int, dict]:
         """Compute position size using half-Kelly Criterion.
 
         kelly_fraction = (win_rate * avg_win/avg_loss - (1-win_rate)) / (avg_win/avg_loss)
         position_size = capital * kelly_fraction * kelly_mult
         Scaled by signal confidence.
+
+        Returns (quantity, intermediates) where intermediates captures sizing details.
         """
         total_trades = strategy.total_trades
         wins = strategy.wins
@@ -160,10 +163,15 @@ class StrategistAgent(BaseAgent):
             risk_pct = self.config.get("max_portfolio_risk_pct", 0.02)
             risk_per_share = abs(price - stop_loss)
             if risk_per_share <= 0:
-                return 1
+                return 1, {"method": "fixed_risk", "fallback": True}
             quantity = max(1, int((capital * risk_pct) / risk_per_share))
             max_shares = int((capital * self.config.get("max_position_pct", 0.15)) / price)
-            return min(quantity, max_shares)
+            return min(quantity, max_shares), {
+                "method": "fixed_risk",
+                "fallback": True,
+                "win_rate": wins / total_trades if total_trades > 0 else 0.5,
+                "total_trades": total_trades,
+            }
 
         win_rate = wins / total_trades if total_trades > 0 else 0.5
 
@@ -193,7 +201,19 @@ class StrategistAgent(BaseAgent):
 
         # Hard cap: max position percentage
         max_shares = int((capital * self.config.get("max_position_pct", 0.15)) / price)
-        return min(quantity, max_shares)
+
+        intermediates = {
+            "method": "kelly",
+            "win_rate": win_rate,
+            "profit_factor": strategy.fitness.profit_factor,
+            "total_trades": total_trades,
+            "kelly_fraction": kelly_fraction,
+            "kelly_mult": kelly_mult,
+            "effective_fraction": effective_fraction,
+            "confidence_scale": confidence_scale,
+        }
+
+        return min(quantity, max_shares), intermediates
 
     def _propose_trades(self, event: Event) -> list[Event]:
         analysis = AnalysisPayload(**event.payload)
@@ -204,12 +224,12 @@ class StrategistAgent(BaseAgent):
         regime_filtered = self._filter_by_regime(strategies)
 
         # Select top strategies via Thompson Sampling
-        selected = self._select_strategies_thompson(
+        all_scored = self._select_strategies_thompson(
             [s for s in regime_filtered if s.is_active],
             k=self.config.get("thompson_k", 3),
         )
 
-        for strategy in selected:
+        for thompson_score, strategy in all_scored:
             params = strategy.genome.to_params()
             if analysis.confidence < params.get("confidence_threshold", 0.6):
                 continue
@@ -251,7 +271,7 @@ class StrategistAgent(BaseAgent):
 
             # Kelly Criterion position sizing
             capital = self.config.get("initial_capital", 100000.0)
-            quantity = self._kelly_position_size(
+            quantity, kelly_intermediates = self._kelly_position_size(
                 strategy, price, stop_loss, analysis.confidence, capital,
             )
 
@@ -274,5 +294,29 @@ class StrategistAgent(BaseAgent):
                 parent=event,
                 priority=EventPriority.HIGH,
             ))
+
+            try:
+                self.memory.record_decision_step(
+                    correlation_id=event.correlation_id,
+                    step_key=f"strategist:{strategy.id}",
+                    agent=self.agent_id,
+                    symbol=analysis.symbol,
+                    strategy_id=strategy.id,
+                    reasoning={
+                        "thompson_score": thompson_score,
+                        "all_thompson_scores": {s.id: round(sc, 6) for sc, s in all_scored},
+                        "regime": self._get_current_regime(),
+                        "regime_filtered_count": len(regime_filtered),
+                        "kelly": kelly_intermediates,
+                        "quantity": quantity,
+                        "stop_loss": round(stop_loss, 2),
+                        "take_profit": round(take_profit, 2),
+                        "atr_based_stops": atr > 0,
+                        "confidence_threshold": params.get("confidence_threshold", 0.6),
+                        "signal_confidence": analysis.confidence,
+                    },
+                )
+            except Exception:
+                logger.debug("Failed to record strategist decision step", exc_info=True)
 
         return events
