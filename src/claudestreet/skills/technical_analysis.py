@@ -307,8 +307,23 @@ class TechnicalAnalysisSkill:
         else:
             stoch_k = (rsi_values[-1] - rsi_min) / rsi_range
 
-        # %D is 3-period SMA of %K (simplified)
-        stoch_d = stoch_k  # simplified single-value
+        # %D is 3-period SMA of %K — compute from recent %K values
+        if len(rsi_values) >= stoch_period + 2:
+            # Compute %K for last 3 points to get %D
+            k_values = []
+            for offset in range(3):
+                idx = len(rsi_values) - offset
+                window = rsi_values[idx - stoch_period:idx]
+                w_min = min(window)
+                w_max = max(window)
+                w_range = w_max - w_min
+                if w_range == 0:
+                    k_values.append(0.5)
+                else:
+                    k_values.append((rsi_values[idx - 1] - w_min) / w_range)
+            stoch_d = sum(k_values) / len(k_values)
+        else:
+            stoch_d = stoch_k
         return float(stoch_k), float(stoch_d)
 
     @staticmethod

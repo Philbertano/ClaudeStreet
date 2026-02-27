@@ -98,22 +98,29 @@ class DynamoMemory:
         take_profit: float,
         strategy_id: str,
     ) -> None:
-        self._trades.put_item(
-            Item=_to_decimal({
-                "trade_id": trade_id,
-                "symbol": symbol,
-                "side": side,
-                "quantity": quantity,
-                "entry_price": entry_price,
-                "stop_loss": stop_loss,
-                "take_profit": take_profit,
-                "strategy_id": strategy_id,
-                "status": "open",
-                "pnl": 0.0,
-                "opened_at": datetime.now(timezone.utc).isoformat(),
-            }),
-            ConditionExpression=Attr("trade_id").not_exists(),  # idempotent
-        )
+        try:
+            self._trades.put_item(
+                Item=_to_decimal({
+                    "trade_id": trade_id,
+                    "symbol": symbol,
+                    "side": side,
+                    "quantity": quantity,
+                    "entry_price": entry_price,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                    "strategy_id": strategy_id,
+                    "status": "open",
+                    "order_state": "pending",
+                    "pnl": 0.0,
+                    "opened_at": datetime.now(timezone.utc).isoformat(),
+                }),
+                ConditionExpression=Attr("trade_id").not_exists(),  # idempotent
+            )
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                logger.debug("Duplicate trade_open %s, skipping", trade_id)
+            else:
+                raise
 
     def record_trade_close(
         self, trade_id: str, exit_price: float, pnl: float
@@ -142,11 +149,19 @@ class DynamoMemory:
                     Key("symbol").eq(symbol) & Key("status").eq("open")
                 ),
             )
-        else:
-            response = self._trades.scan(
-                FilterExpression=Attr("status").eq("open"),
-            )
-        return [_from_decimal(item) for item in response.get("Items", [])]
+            return [_from_decimal(item) for item in response.get("Items", [])]
+
+        # Full scan with pagination to handle >1 MB of data
+        items: list[dict] = []
+        scan_kwargs = {"FilterExpression": Attr("status").eq("open")}
+        while True:
+            response = self._trades.scan(**scan_kwargs)
+            items.extend(response.get("Items", []))
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            scan_kwargs["ExclusiveStartKey"] = last_key
+        return [_from_decimal(item) for item in items]
 
     def get_strategy_trades(self, strategy_id: str) -> list[dict]:
         response = self._trades.query(
@@ -173,6 +188,10 @@ class DynamoMemory:
             ),
             "total_trades": strategy_data.get("total_trades", 0),
             "total_pnl": strategy_data.get("total_pnl", 0.0),
+            "wins": strategy_data.get("wins", 0),
+            "losses": strategy_data.get("losses", 0),
+            "kelly_fraction_mult": strategy_data.get("kelly_fraction_mult", 0.5),
+            "regime_preference": strategy_data.get("regime_preference", ""),
             "version": strategy_data.get("version", 1),
         }
         expected_version = strategy_data.get("version", 1)
@@ -181,7 +200,7 @@ class DynamoMemory:
                 Item=_to_decimal(item),
                 ConditionExpression=(
                     Attr("strategy_id").not_exists()
-                    | Attr("version").lt(expected_version)
+                    | Attr("version").lte(expected_version)
                 ),
             )
         except ClientError as e:

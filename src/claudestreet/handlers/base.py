@@ -84,16 +84,19 @@ def _emit_emf_metrics(
     print(json.dumps(emf))
 
 
-def _extract_event_from_sqs(raw_event: dict) -> dict:
-    """Extract EventBridge event from SQS envelope if present."""
-    # SQS wraps EventBridge events in Records[].body
+def _extract_events_from_sqs(raw_event: dict) -> list[dict]:
+    """Extract all EventBridge events from SQS envelope if present."""
     records = raw_event.get("Records", [])
-    if records and "body" in records[0]:
-        body = records[0]["body"]
+    if not records or "body" not in records[0]:
+        return [raw_event]
+
+    events = []
+    for record in records:
+        body = record.get("body", "{}")
         if isinstance(body, str):
             body = json.loads(body)
-        return body
-    return raw_event
+        events.append(body)
+    return events
 
 
 def create_handler(agent_class: Type[BaseAgent]) -> Callable:
@@ -110,22 +113,24 @@ def create_handler(agent_class: Type[BaseAgent]) -> Callable:
         agent = agent_class(memory=memory, config=config)
 
         try:
-            # Unwrap SQS envelope if present
-            actual_event = _extract_event_from_sqs(event)
+            # Unwrap SQS envelope — may contain multiple records
+            actual_events = _extract_events_from_sqs(event)
 
-            # Determine if this is a heartbeat or a routed event
-            is_heartbeat = EventBridgeClient.is_heartbeat(actual_event)
+            output_events: list[Event] = []
+            for actual_event in actual_events:
+                # Determine if this is a heartbeat or a routed event
+                is_heartbeat = EventBridgeClient.is_heartbeat(actual_event)
 
-            if is_heartbeat:
-                logger.info("[%s] Heartbeat triggered", agent.agent_id)
-                output_events = agent.heartbeat()
-            else:
-                parsed = EventBridgeClient.from_eventbridge(actual_event)
-                logger.info(
-                    "[%s] Processing %s from %s",
-                    agent.agent_id, parsed.type.value, parsed.source,
-                )
-                output_events = agent.process(parsed)
+                if is_heartbeat:
+                    logger.info("[%s] Heartbeat triggered", agent.agent_id)
+                    output_events.extend(agent.heartbeat())
+                else:
+                    parsed = EventBridgeClient.from_eventbridge(actual_event)
+                    logger.info(
+                        "[%s] Processing %s from %s",
+                        agent.agent_id, parsed.type.value, parsed.source,
+                    )
+                    output_events.extend(agent.process(parsed))
 
             # Publish output events to EventBridge
             published = 0

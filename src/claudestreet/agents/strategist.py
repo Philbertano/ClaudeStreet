@@ -143,7 +143,6 @@ class StrategistAgent(BaseAgent):
         position_size = capital * kelly_fraction * kelly_mult
         Scaled by signal confidence.
         """
-        params = strategy.genome.to_params()
         total_trades = strategy.total_trades
         wins = strategy.wins
 
@@ -159,7 +158,6 @@ class StrategistAgent(BaseAgent):
             return min(quantity, max_shares)
 
         win_rate = wins / total_trades if total_trades > 0 else 0.5
-        losses = total_trades - wins
 
         # Estimate avg win/loss ratio from fitness or default
         avg_win_loss = strategy.fitness.profit_factor if strategy.fitness.profit_factor > 0 else 1.5

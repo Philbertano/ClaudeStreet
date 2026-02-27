@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from claudestreet.agents.base import BaseAgent
 from claudestreet.models.events import (
@@ -213,8 +214,9 @@ class RiskGuardAgent(BaseAgent):
         if risk > 0 and reward / risk < 1.5:
             rejections.append(f"R:R {reward/risk:.2f} below 1.5 minimum")
 
-        # 6. Restricted hours
-        current_time = now.strftime("%H:%M")
+        # 6. Restricted hours (US Eastern, where the market operates)
+        eastern = now.astimezone(ZoneInfo("America/New_York"))
+        current_time = eastern.strftime("%H:%M")
         for window in self.config.get("restricted_hours", []):
             parts = window.split("-")
             if len(parts) == 2 and parts[0] <= current_time <= parts[1]:

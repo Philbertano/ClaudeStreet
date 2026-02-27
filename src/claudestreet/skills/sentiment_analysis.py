@@ -100,7 +100,7 @@ class SentimentAnalysisSkill:
         except Exception:
             logger.debug("Failed to cache sentiment result")
 
-    async def fetch_and_score(
+    def fetch_and_score(
         self, symbol: str, feed_urls: list[str] | None = None
     ) -> dict[str, Any]:
         """Fetch news for a symbol and compute sentiment score.

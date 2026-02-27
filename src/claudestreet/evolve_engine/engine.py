@@ -502,6 +502,7 @@ class EvolutionEngine:
             "created_at": candidate["created_at"],
             "total_trades": 0,
             "total_pnl": 0.0,
+            "version": 1,
         })
 
         logger.info("Deployed strategy %s (composite=%.4f)", strategy_id, avg_composite)
@@ -532,12 +533,26 @@ class EvolutionEngine:
                 if isinstance(content, str):
                     entry["content"] = content
                 elif isinstance(content, list):
-                    entry["content"] = [
-                        block if isinstance(block, dict) else
-                        {"type": block.type, "text": getattr(block, "text", "")}
-                        if hasattr(block, "type") else str(block)
-                        for block in content
-                    ]
+                    serialized_blocks = []
+                    for block in content:
+                        if isinstance(block, dict):
+                            serialized_blocks.append(block)
+                        elif hasattr(block, "type"):
+                            if block.type == "tool_use":
+                                serialized_blocks.append({
+                                    "type": "tool_use",
+                                    "id": block.id,
+                                    "name": block.name,
+                                    "input": block.input,
+                                })
+                            else:
+                                serialized_blocks.append({
+                                    "type": block.type,
+                                    "text": getattr(block, "text", ""),
+                                })
+                        else:
+                            serialized_blocks.append(str(block))
+                    entry["content"] = serialized_blocks
                 else:
                     entry["content"] = str(content)
                 serializable.append(entry)

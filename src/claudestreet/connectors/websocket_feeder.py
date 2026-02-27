@@ -73,29 +73,32 @@ class WebSocketFeeder:
             self._polling_fallback()
 
     def _on_open(self, ws) -> None:
-        """Authenticate and subscribe to bar data."""
-        # Authenticate
+        """Authenticate on connection open. Subscription happens after auth confirmation."""
         auth_msg = {
             "action": "auth",
             "key": self._api_key,
             "secret": self._secret_key,
         }
         ws.send(json.dumps(auth_msg))
-
-        # Subscribe to minute bars
-        sub_msg = {
-            "action": "subscribe",
-            "bars": self._watchlist,
-        }
-        ws.send(json.dumps(sub_msg))
-        logger.info("Subscribed to bars for %d symbols", len(self._watchlist))
+        logger.info("Auth message sent, waiting for confirmation")
 
     def _on_message(self, ws, message: str) -> None:
-        """Forward received bars to Kinesis."""
+        """Handle messages: auth confirmation triggers subscribe, bars go to Kinesis."""
         try:
             data = json.loads(message)
             if not isinstance(data, list):
                 data = [data]
+
+            # Check for auth confirmation — subscribe after successful auth
+            for item in data:
+                if isinstance(item, dict) and item.get("T") == "success" and item.get("msg") == "authenticated":
+                    sub_msg = {
+                        "action": "subscribe",
+                        "bars": self._watchlist,
+                    }
+                    ws.send(json.dumps(sub_msg))
+                    logger.info("Authenticated — subscribed to bars for %d symbols", len(self._watchlist))
+                    return
 
             records = []
             for item in data:
