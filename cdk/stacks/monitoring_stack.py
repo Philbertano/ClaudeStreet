@@ -3,6 +3,7 @@
 Creates:
   - CloudWatch dashboard with key trading metrics
   - Alarms for circuit breakers, error rates, DLQ depth
+  - Trading-specific alarms: PnL loss, drawdown, heartbeat gaps, stuck orders
   - SNS topic for alerts (email/SMS/Slack)
   - Log metric filters for trade events
 """
@@ -72,6 +73,76 @@ class MonitoringStack(cdk.Stack):
             )
             alarm.add_alarm_action(cw_actions.SnsAction(self.alerts_topic))
 
+        # ── Trading-specific CloudWatch alarms ──
+
+        # Daily PnL loss > 3%
+        daily_pnl_alarm = cw.Alarm(
+            self, "DailyPnLAlarm",
+            alarm_name=f"{prefix}-daily-pnl-loss",
+            metric=cw.Metric(
+                namespace="ClaudeStreet",
+                metric_name="DailyPnL",
+                period=Duration.hours(1),
+                statistic="Minimum",
+            ),
+            threshold=-3.0,
+            evaluation_periods=1,
+            comparison_operator=cw.ComparisonOperator.LESS_THAN_THRESHOLD,
+            alarm_description="Daily PnL loss exceeds 3% — circuit breaker may be needed",
+            treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
+        )
+        daily_pnl_alarm.add_alarm_action(cw_actions.SnsAction(self.alerts_topic))
+
+        # Drawdown > 10%
+        drawdown_alarm = cw.Alarm(
+            self, "DrawdownAlarm",
+            alarm_name=f"{prefix}-max-drawdown",
+            metric=cw.Metric(
+                namespace="ClaudeStreet",
+                metric_name="MaxDrawdown",
+                period=Duration.hours(1),
+                statistic="Maximum",
+            ),
+            threshold=10.0,
+            evaluation_periods=1,
+            comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
+            alarm_description="Portfolio drawdown exceeds 10%",
+            treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
+        )
+        drawdown_alarm.add_alarm_action(cw_actions.SnsAction(self.alerts_topic))
+
+        # No sentinel heartbeat > 5 minutes
+        sentinel_heartbeat_alarm = cw.Alarm(
+            self, "SentinelHeartbeatAlarm",
+            alarm_name=f"{prefix}-sentinel-no-heartbeat",
+            metric=agents.functions["sentinel"].metric_invocations(period=Duration.minutes(5)),
+            threshold=0,
+            evaluation_periods=2,
+            comparison_operator=cw.ComparisonOperator.LESS_THAN_OR_EQUAL_TO_THRESHOLD,
+            alarm_description="Sentinel agent has not executed in 10 minutes",
+            treat_missing_data=cw.TreatMissingData.BREACHING,
+        )
+        sentinel_heartbeat_alarm.add_alarm_action(cw_actions.SnsAction(self.alerts_topic))
+
+        # Orders stuck > 5 min (executor handler duration)
+        executor_duration_alarm = cw.Alarm(
+            self, "ExecutorDurationAlarm",
+            alarm_name=f"{prefix}-executor-slow",
+            metric=cw.Metric(
+                namespace="ClaudeStreet",
+                metric_name="HandlerDurationMs",
+                dimensions_map={"Agent": "executor"},
+                period=Duration.minutes(5),
+                statistic="Maximum",
+            ),
+            threshold=300000,  # 5 minutes in ms
+            evaluation_periods=1,
+            comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
+            alarm_description="Executor agent taking too long — orders may be stuck",
+            treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
+        )
+        executor_duration_alarm.add_alarm_action(cw_actions.SnsAction(self.alerts_topic))
+
         # ── CloudWatch Dashboard ──
         dashboard = cw.Dashboard(
             self, "Dashboard",
@@ -109,7 +180,53 @@ class MonitoringStack(cdk.Stack):
             ))
         dashboard.add_widgets(*duration_widgets)
 
-        # Row 3: DynamoDB metrics
+        # Row 3: Trading-specific EMF metrics
+        dashboard.add_widgets(
+            cw.GraphWidget(
+                title="Trades Executed",
+                left=[cw.Metric(
+                    namespace="ClaudeStreet",
+                    metric_name="TradesExecuted",
+                    dimensions_map={"Agent": "executor"},
+                    period=Duration.minutes(5),
+                    statistic="Sum",
+                )],
+                width=8,
+                height=6,
+            ),
+            cw.GraphWidget(
+                title="Handler Duration by Agent",
+                left=[
+                    cw.Metric(
+                        namespace="ClaudeStreet",
+                        metric_name="HandlerDurationMs",
+                        dimensions_map={"Agent": agent_name},
+                        period=Duration.minutes(5),
+                        statistic="Average",
+                    )
+                    for agent_name in agents.functions
+                ],
+                width=8,
+                height=6,
+            ),
+            cw.GraphWidget(
+                title="Events Published",
+                left=[
+                    cw.Metric(
+                        namespace="ClaudeStreet",
+                        metric_name="EventsPublished",
+                        dimensions_map={"Agent": agent_name},
+                        period=Duration.minutes(5),
+                        statistic="Sum",
+                    )
+                    for agent_name in agents.functions
+                ],
+                width=8,
+                height=6,
+            ),
+        )
+
+        # Row 4: DynamoDB metrics
         dashboard.add_widgets(
             cw.GraphWidget(
                 title="Trades Table - Read/Write",
@@ -145,7 +262,7 @@ class MonitoringStack(cdk.Stack):
             ),
         )
 
-        # Row 4: EventBridge metrics
+        # Row 5: EventBridge metrics
         dashboard.add_widgets(
             cw.GraphWidget(
                 title="EventBridge - Events Matched",

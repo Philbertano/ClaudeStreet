@@ -22,6 +22,7 @@ from typing import Any
 
 import boto3
 from botocore.exceptions import ClientError
+from tenacity import retry, stop_after_attempt, wait_exponential_jitter, retry_if_exception_type
 
 from claudestreet.models.events import Event, EventType
 
@@ -48,6 +49,15 @@ class EventBridgeClient:
             region_name=region or os.environ.get("AWS_REGION", "us-east-1"),
         )
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential_jitter(initial=0.5, max=10),
+        retry=retry_if_exception_type(ClientError),
+        before_sleep=lambda rs: logger.warning(
+            "Retrying put_event (attempt %d)", rs.attempt_number
+        ),
+        reraise=True,
+    )
     def put_event(self, event: Event) -> str | None:
         """Publish a single event to EventBridge.
 
@@ -74,7 +84,32 @@ class EventBridgeClient:
 
         except ClientError:
             logger.exception("EventBridge put_event failed for %s", event.type.value)
-            return None
+            raise
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential_jitter(initial=0.5, max=10),
+        retry=retry_if_exception_type(ClientError),
+        before_sleep=lambda rs: logger.warning(
+            "Retrying put_events batch (attempt %d)", rs.attempt_number
+        ),
+        reraise=True,
+    )
+    def _put_events_batch(self, entries: list[dict], batch: list[Event]) -> int:
+        """Publish a single batch of entries with retry."""
+        response = self._client.put_events(Entries=entries)
+        failed = response.get("FailedEntryCount", 0)
+        published = len(batch) - failed
+
+        if failed > 0:
+            for j, entry_resp in enumerate(response["Entries"]):
+                if "ErrorMessage" in entry_resp:
+                    logger.error(
+                        "Batch publish failed for event %s: %s",
+                        batch[j].id,
+                        entry_resp["ErrorMessage"],
+                    )
+        return published
 
     def put_events(self, events: list[Event]) -> int:
         """Publish multiple events in batches of 10.
@@ -90,20 +125,9 @@ class EventBridgeClient:
             entries = [self._to_eb_entry(e) for e in batch]
 
             try:
-                response = self._client.put_events(Entries=entries)
-                failed = response.get("FailedEntryCount", 0)
-                published += len(batch) - failed
-
-                if failed > 0:
-                    for j, entry_resp in enumerate(response["Entries"]):
-                        if "ErrorMessage" in entry_resp:
-                            logger.error(
-                                "Batch publish failed for event %s: %s",
-                                batch[j].id,
-                                entry_resp["ErrorMessage"],
-                            )
+                published += self._put_events_batch(entries, batch)
             except ClientError:
-                logger.exception("EventBridge batch put_events failed")
+                logger.exception("EventBridge batch put_events failed after retries")
 
         logger.info("Published %d / %d events", published, len(events))
         return published

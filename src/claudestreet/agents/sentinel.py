@@ -34,7 +34,7 @@ class SentinelAgent(BaseAgent):
         return []
 
     def heartbeat(self) -> list[Event]:
-        """Fetch latest data for watchlist and scan for signals."""
+        """Fetch latest data for watchlist, scan for signals, and check cross-asset."""
         connector = MarketDataConnector()
         events: list[Event] = []
         watchlist = self.config.get("watchlist", [])
@@ -51,6 +51,49 @@ class SentinelAgent(BaseAgent):
                     events.extend(self._process_tick(tick_event))
             except Exception:
                 logger.exception("Failed to fetch data for %s", symbol)
+
+        # Cross-asset scan
+        events.extend(self._scan_cross_asset(connector))
+
+        return events
+
+    def _scan_cross_asset(self, connector: MarketDataConnector) -> list[Event]:
+        """Scan cross-asset signals: VIX spike, yield signals, dollar strength."""
+        events: list[Event] = []
+        try:
+            signals = connector.get_cross_asset_signals()
+            if not signals:
+                return events
+
+            # VIX spike: emit alert if VIX > 25
+            vix = signals.get("vix", 0)
+            if vix > 25:
+                events.append(self.emit(
+                    EventType.RISK_ALERT,
+                    payload={
+                        "alert_type": "vix_spike",
+                        "vix": vix,
+                        "vix_change": signals.get("vix_change", 0),
+                        "cross_asset_signals": signals,
+                    },
+                    priority=EventPriority.HIGH,
+                ))
+
+            # VIX term structure inversion (backwardation = fear)
+            vix_term = signals.get("vix_term_structure", 0)
+            if vix_term > 1.05:  # VIX > VIX3M by 5%
+                events.append(self.emit(
+                    EventType.RISK_ALERT,
+                    payload={
+                        "alert_type": "vix_backwardation",
+                        "vix_term_structure": vix_term,
+                        "message": "VIX in backwardation — elevated short-term fear",
+                    },
+                    priority=EventPriority.HIGH,
+                ))
+
+        except Exception:
+            logger.debug("Cross-asset scan failed (non-critical)")
 
         return events
 

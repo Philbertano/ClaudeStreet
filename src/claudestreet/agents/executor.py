@@ -2,6 +2,7 @@
 
 Only acts on RiskGuard-approved proposals. Supports paper
 trading (default) and live Alpaca API execution.
+Tracks order lifecycle via OrderStateMachine.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from claudestreet.models.events import (
     Event, EventType, EventPriority,
     TradeProposalPayload, TradeExecutedPayload,
 )
+from claudestreet.models.order_state import OrderState, OrderStateMachine
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +23,10 @@ logger = logging.getLogger(__name__)
 class ExecutorAgent(BaseAgent):
     agent_id = "executor"
     description = "Trade execution via broker API"
+
+    def __init__(self, memory, config) -> None:
+        super().__init__(memory, config)
+        self._osm = OrderStateMachine(memory)
 
     def process(self, event: Event) -> list[Event]:
         if event.type == EventType.RISK_APPROVED:
@@ -49,6 +55,15 @@ class ExecutorAgent(BaseAgent):
             take_profit=proposal.take_profit,
             strategy_id=proposal.strategy_id,
         )
+
+        # Track order lifecycle: PENDING -> SUBMITTED -> FILLED (instant for paper)
+        self._osm.transition(trade_id, OrderState.PENDING, OrderState.SUBMITTED)
+        self._osm.transition(trade_id, OrderState.SUBMITTED, OrderState.ACCEPTED)
+        self._osm.transition(trade_id, OrderState.ACCEPTED, OrderState.FILLED, metadata={
+            "order_id": order_id,
+            "fill_price": proposal.entry_price,
+            "paper": True,
+        })
 
         logger.info("[executor] PAPER %s %d %s @ %.2f",
                      proposal.side, proposal.quantity, proposal.symbol, proposal.entry_price)
@@ -80,7 +95,24 @@ class ExecutorAgent(BaseAgent):
             base_url=self.config.get("alpaca_base_url", "https://paper-api.alpaca.markets"),
         )
 
+        trade_id = f"trade-{uuid.uuid4().hex[:8]}"
+
         try:
+            # Record trade open with PENDING state
+            self.memory.record_trade_open(
+                trade_id=trade_id,
+                symbol=proposal.symbol,
+                side=proposal.side,
+                quantity=proposal.quantity,
+                entry_price=proposal.entry_price,
+                stop_loss=proposal.stop_loss,
+                take_profit=proposal.take_profit,
+                strategy_id=proposal.strategy_id,
+            )
+
+            # Transition to SUBMITTED
+            self._osm.transition(trade_id, OrderState.PENDING, OrderState.SUBMITTED)
+
             result = broker.submit_order(
                 symbol=proposal.symbol,
                 side=proposal.side,
@@ -89,19 +121,15 @@ class ExecutorAgent(BaseAgent):
             )
 
             if result.get("status") in ("filled", "new", "accepted"):
-                trade_id = f"trade-{uuid.uuid4().hex[:8]}"
                 fill_price = result.get("fill_price", proposal.entry_price)
 
-                self.memory.record_trade_open(
-                    trade_id=trade_id,
-                    symbol=proposal.symbol,
-                    side=proposal.side,
-                    quantity=proposal.quantity,
-                    entry_price=fill_price,
-                    stop_loss=proposal.stop_loss,
-                    take_profit=proposal.take_profit,
-                    strategy_id=proposal.strategy_id,
-                )
+                # Transition through states
+                self._osm.transition(trade_id, OrderState.SUBMITTED, OrderState.ACCEPTED)
+                self._osm.transition(trade_id, OrderState.ACCEPTED, OrderState.FILLED, metadata={
+                    "order_id": result.get("order_id", ""),
+                    "fill_price": fill_price,
+                    "filled_qty": result.get("filled_qty", 0),
+                })
 
                 return [self.emit(
                     EventType.TRADE_EXECUTED,
@@ -121,15 +149,32 @@ class ExecutorAgent(BaseAgent):
                     priority=EventPriority.HIGH,
                 )]
             else:
+                # Order rejected by broker
+                self._osm.transition(
+                    trade_id, OrderState.SUBMITTED, OrderState.REJECTED,
+                    metadata={"reason": result.get("status", "unknown")},
+                )
                 return [self.emit(
                     EventType.TRADE_FAILED,
-                    payload={"symbol": proposal.symbol, "reason": result.get("status", "unknown")},
+                    payload={
+                        "symbol": proposal.symbol,
+                        "trade_id": trade_id,
+                        "reason": result.get("status", "unknown"),
+                    },
                     parent=parent,
                 )]
         except Exception as e:
             logger.exception("[executor] Live execution failed")
+            self._osm.transition(
+                trade_id, OrderState.SUBMITTED, OrderState.FAILED,
+                metadata={"error": str(e)},
+            )
             return [self.emit(
                 EventType.TRADE_FAILED,
-                payload={"symbol": proposal.symbol, "reason": str(e)},
+                payload={
+                    "symbol": proposal.symbol,
+                    "trade_id": trade_id,
+                    "reason": str(e),
+                },
                 parent=parent,
             )]

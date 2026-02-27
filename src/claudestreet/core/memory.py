@@ -124,6 +124,7 @@ class DynamoMemory:
                 "SET #s = :status, exit_price = :exit_price, "
                 "pnl = :pnl, closed_at = :closed_at"
             ),
+            ConditionExpression=Attr("status").eq("open"),
             ExpressionAttributeNames={"#s": "status"},
             ExpressionAttributeValues=_to_decimal({
                 ":status": "closed",
@@ -172,8 +173,22 @@ class DynamoMemory:
             ),
             "total_trades": strategy_data.get("total_trades", 0),
             "total_pnl": strategy_data.get("total_pnl", 0.0),
+            "version": strategy_data.get("version", 1),
         }
-        self._strategies.put_item(Item=_to_decimal(item))
+        expected_version = strategy_data.get("version", 1)
+        try:
+            self._strategies.put_item(
+                Item=_to_decimal(item),
+                ConditionExpression=(
+                    Attr("strategy_id").not_exists()
+                    | Attr("version").lt(expected_version)
+                ),
+            )
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                logger.warning("Strategy %s version conflict, skipping", strategy_data["id"])
+            else:
+                raise
 
     def get_active_strategies(self) -> list[dict]:
         response = self._strategies.query(
@@ -208,19 +223,20 @@ class DynamoMemory:
         total_value: float,
         daily_pnl: float,
         open_positions: int,
+        snapshot_id: str | None = None,
     ) -> None:
         now = datetime.now(timezone.utc)
-        self._snapshots.put_item(
-            Item=_to_decimal({
-                "date": now.strftime("%Y-%m-%d"),
-                "timestamp": now.isoformat(),
-                "cash": cash,
-                "positions_value": positions_value,
-                "total_value": total_value,
-                "daily_pnl": daily_pnl,
-                "open_positions": open_positions,
-            })
-        )
+        item = {
+            "date": now.strftime("%Y-%m-%d"),
+            "timestamp": now.isoformat(),
+            "snapshot_id": snapshot_id or f"snap-{now.strftime('%Y%m%d%H%M%S')}",
+            "cash": cash,
+            "positions_value": positions_value,
+            "total_value": total_value,
+            "daily_pnl": daily_pnl,
+            "open_positions": open_positions,
+        }
+        self._snapshots.put_item(Item=_to_decimal(item))
 
     def get_portfolio_history(self, days: int = 30) -> list[dict]:
         from datetime import timedelta
@@ -264,7 +280,16 @@ class DynamoMemory:
         }
         if correlation_id:
             item["correlation_id"] = correlation_id
-        self._events.put_item(Item=_to_decimal(item))
+        try:
+            self._events.put_item(
+                Item=_to_decimal(item),
+                ConditionExpression=Attr("event_id").not_exists(),
+            )
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                logger.debug("Duplicate event %s, skipping", event_id)
+            else:
+                raise
 
     def get_event_chain(self, correlation_id: str) -> list[dict]:
         response = self._events.query(
