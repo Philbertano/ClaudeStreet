@@ -235,6 +235,12 @@ class AgentsStack(cdk.Stack):
         spec: dict,
         image: lambda_.DockerImageCode,
     ) -> lambda_.DockerImageFunction:
+        log_group = logs.LogGroup(
+            self, f"{name.title()}Logs",
+            log_group_name=f"/aws/lambda/{self.prefix}-{name}",
+            retention=logs.RetentionDays.TWO_WEEKS,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
         return lambda_.DockerImageFunction(
             self, f"{name.title()}Fn",
             function_name=f"{self.prefix}-{name}",
@@ -254,7 +260,7 @@ class AgentsStack(cdk.Stack):
             },
             dead_letter_queue=self.dlq,
             retry_attempts=2,
-            log_retention=logs.RetentionDays.TWO_WEEKS,
+            log_group=log_group,
         )
 
     def _create_event_rules(
@@ -326,6 +332,12 @@ class AgentsStack(cdk.Stack):
             exclude=docker_exclude,
             cmd=["claudestreet.handlers.dlq_replayer.handler"],
         )
+        replayer_log_group = logs.LogGroup(
+            self, "DlqReplayerLogs",
+            log_group_name=f"/aws/lambda/{self.prefix}-dlq-replayer",
+            retention=logs.RetentionDays.TWO_WEEKS,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
         replayer_fn = lambda_.DockerImageFunction(
             self, "DlqReplayerFn",
             function_name=f"{self.prefix}-dlq-replayer",
@@ -338,7 +350,7 @@ class AgentsStack(cdk.Stack):
                 "DLQ_URL": self.dlq.queue_url,
                 "LOG_LEVEL": "INFO",
             },
-            log_retention=logs.RetentionDays.TWO_WEEKS,
+            log_group=replayer_log_group,
         )
 
         # Grant SQS read/delete on DLQ
@@ -368,6 +380,12 @@ class AgentsStack(cdk.Stack):
             exclude=docker_exclude,
             cmd=["claudestreet.handlers.stream_processor.handler"],
         )
+        stream_log_group = logs.LogGroup(
+            self, "StreamProcessorLogs",
+            log_group_name=f"/aws/lambda/{self.prefix}-stream-processor",
+            retention=logs.RetentionDays.TWO_WEEKS,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
         stream_fn = lambda_.DockerImageFunction(
             self, "StreamProcessorFn",
             function_name=f"{self.prefix}-stream-processor",
@@ -381,7 +399,7 @@ class AgentsStack(cdk.Stack):
                 "STRATEGIES_TABLE": core.strategies_table.table_name,
                 "LOG_LEVEL": "INFO",
             },
-            log_retention=logs.RetentionDays.TWO_WEEKS,
+            log_group=stream_log_group,
         )
 
         # Trigger from DynamoDB Streams on trades table

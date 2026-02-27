@@ -151,7 +151,7 @@ class CoreStack(cdk.Stack):
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             encryption=dynamodb.TableEncryption.CUSTOMER_MANAGED,
             encryption_key=self.kms_key,
-            point_in_time_recovery=True,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(point_in_time_recovery_enabled=True),
             removal_policy=RemovalPolicy.RETAIN,
             stream=dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
         )
@@ -185,7 +185,7 @@ class CoreStack(cdk.Stack):
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             encryption=dynamodb.TableEncryption.CUSTOMER_MANAGED,
             encryption_key=self.kms_key,
-            point_in_time_recovery=True,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(point_in_time_recovery_enabled=True),
             removal_policy=RemovalPolicy.RETAIN,
         )
         table.add_global_secondary_index(
