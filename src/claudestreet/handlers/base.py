@@ -158,11 +158,19 @@ def create_handler(agent_class: Type[BaseAgent]) -> Callable:
                 trades_executed=trades_executed,
             )
 
+            risk_approved = any(
+                e.type == EventType.RISK_APPROVED for e in (output_events or [])
+            )
+            risk_rejected = any(
+                e.type == EventType.RISK_REJECTED for e in (output_events or [])
+            )
+
             return {
                 "statusCode": 200,
                 "agent": agent.agent_id,
                 "events_published": published,
                 "duration_ms": round(elapsed),
+                "approved": risk_approved and not risk_rejected,
             }
 
         except Exception as e:

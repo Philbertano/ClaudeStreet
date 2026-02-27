@@ -44,14 +44,20 @@ class AnalystAgent(BaseAgent):
     def _analyze_signal(self, event: Event) -> list[Event]:
         signal = SignalPayload(**event.payload)
 
-        # SL/TP triggers → immediate close signal
+        # SL/TP triggers → immediate close signal (direction depends on position side)
         if signal.signal_type in ("stop_loss", "take_profit"):
+            if signal.side == "buy":
+                close_side = "sell"
+            elif signal.side == "sell":
+                close_side = "buy"
+            else:
+                close_side = "sell"  # legacy fallback
             return [self.emit(
                 EventType.ANALYSIS_COMPLETE,
                 payload=AnalysisPayload(
                     symbol=signal.symbol,
                     technical=signal.indicators,
-                    recommendation="sell",
+                    recommendation=close_side,
                     confidence=1.0,
                     summary=f"{signal.signal_type} triggered",
                 ).model_dump(),

@@ -113,6 +113,7 @@ class SignalPayload(BaseModel):
     indicators: dict[str, float] = Field(default_factory=dict)
     timeframe: str = "1d"
     signal_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
+    side: str = ""            # "buy" or "sell" — empty means unknown/legacy
 
 
 class TradeProposalPayload(BaseModel):

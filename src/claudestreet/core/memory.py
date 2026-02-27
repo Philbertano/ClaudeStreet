@@ -186,11 +186,19 @@ class DynamoMemory:
         return [_from_decimal(item) for item in items]
 
     def get_strategy_trades(self, strategy_id: str) -> list[dict]:
-        response = self._trades.query(
-            IndexName="strategy-index",
-            KeyConditionExpression=Key("strategy_id").eq(strategy_id),
-        )
-        return [_from_decimal(item) for item in response.get("Items", [])]
+        items: list[dict] = []
+        query_kwargs = {
+            "IndexName": "strategy-index",
+            "KeyConditionExpression": Key("strategy_id").eq(strategy_id),
+        }
+        while True:
+            response = self._trades.query(**query_kwargs)
+            items.extend(response.get("Items", []))
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            query_kwargs["ExclusiveStartKey"] = last_key
+        return [_from_decimal(item) for item in items]
 
     # ──────────────────────────────────────────────
     # Strategies

@@ -178,6 +178,7 @@ class SentinelAgent(BaseAgent):
                         strength=1.0,
                         indicators={"trigger_price": tick.price},
                         timeframe="tick",
+                        side=side,
                     ).model_dump(),
                     correlation_id=event.correlation_id or event.id,
                     parent_id=event.id,

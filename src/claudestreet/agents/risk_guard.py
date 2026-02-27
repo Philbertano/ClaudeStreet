@@ -213,7 +213,7 @@ class RiskGuardAgent(BaseAgent):
         # 3. Max open positions
         all_open = self.memory.get_open_trades()
         max_pos = self.config.get("max_positions", 10)
-        max_pos_passed = len(all_open) < max_pos or bool(open_trades)
+        max_pos_passed = len(all_open) < max_pos
         checks["max_positions"] = {
             "count": len(all_open), "limit": max_pos, "passed": max_pos_passed,
         }

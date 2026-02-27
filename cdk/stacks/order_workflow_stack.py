@@ -101,7 +101,7 @@ class OrderWorkflowStack(cdk.Stack):
             .next(
                 check_approval
                 .when(
-                    sfn.Condition.number_equals("$.riskResult.Payload.statusCode", 200),
+                    sfn.Condition.boolean_equals("$.riskResult.Payload.approved", True),
                     submit_order
                     .next(record_trade)
                     .next(success)
