@@ -20,6 +20,7 @@ from aws_cdk import (
     aws_events_targets as targets,
     aws_iam as iam,
     aws_lambda as lambda_,
+    aws_lambda_destinations as lambda_destinations,
     aws_lambda_event_sources as lambda_event_sources,
     aws_logs as logs,
     aws_scheduler as scheduler,
@@ -104,12 +105,10 @@ class AgentsStack(cdk.Stack):
         self.core = core
         self.functions: dict[str, lambda_.Function] = {}
 
-        # ── Shared Lambda Docker image ──
-        docker_image = lambda_.DockerImageCode.from_image_asset(
-            directory="..",
-            file="Dockerfile",
-            exclude=["cdk", "cdk.out", ".git", "data", ".venv", "tests"],
-        )
+        # ── Docker image asset directory config ──
+        docker_dir = ".."
+        docker_file = "Dockerfile"
+        docker_exclude = ["cdk", "cdk.out", ".git", "data", ".venv", "tests"]
 
         # ── Dead letter queue (shared) ──
         self.dlq = sqs.Queue(
@@ -128,7 +127,13 @@ class AgentsStack(cdk.Stack):
 
         # ── Create Lambda + SQS + EventBridge rule for each agent ──
         for agent_name, spec in AGENT_SPECS.items():
-            fn = self._create_agent_lambda(agent_name, spec, docker_image)
+            agent_image = lambda_.DockerImageCode.from_image_asset(
+                directory=docker_dir,
+                file=docker_file,
+                exclude=docker_exclude,
+                cmd=[spec["handler"]],
+            )
+            fn = self._create_agent_lambda(agent_name, spec, agent_image)
 
             # Create per-agent SQS queue (EventBridge → SQS → Lambda)
             agent_queue = sqs.Queue(
@@ -166,10 +171,10 @@ class AgentsStack(cdk.Stack):
             self.functions[agent_name] = fn
 
         # ── DLQ Replayer Lambda ──
-        self._create_dlq_replayer(docker_image, core)
+        self._create_dlq_replayer(docker_dir, docker_file, docker_exclude, core)
 
         # ── DynamoDB Stream processor Lambda ──
-        self._create_stream_processor(docker_image, core)
+        self._create_stream_processor(docker_dir, docker_file, docker_exclude, core)
 
         # ── WebSocket feeder Fargate task ──
         self._create_websocket_feeder(core)
@@ -250,8 +255,6 @@ class AgentsStack(cdk.Stack):
             dead_letter_queue=self.dlq,
             retry_attempts=2,
             log_retention=logs.RetentionDays.TWO_WEEKS,
-            # Override the CMD to use this agent's handler
-            command=[spec["handler"]],
         )
 
     def _create_event_rules(
@@ -311,14 +314,22 @@ class AgentsStack(cdk.Stack):
 
     def _create_dlq_replayer(
         self,
-        image: lambda_.DockerImageCode,
+        docker_dir: str,
+        docker_file: str,
+        docker_exclude: list[str],
         core: CoreStack,
     ) -> None:
         """Create Lambda that replays messages from the DLQ."""
+        replayer_image = lambda_.DockerImageCode.from_image_asset(
+            directory=docker_dir,
+            file=docker_file,
+            exclude=docker_exclude,
+            cmd=["claudestreet.handlers.dlq_replayer.handler"],
+        )
         replayer_fn = lambda_.DockerImageFunction(
             self, "DlqReplayerFn",
             function_name=f"{self.prefix}-dlq-replayer",
-            code=image,
+            code=replayer_image,
             timeout=Duration.seconds(60),
             memory_size=256,
             role=self.agent_role,
@@ -328,7 +339,6 @@ class AgentsStack(cdk.Stack):
                 "LOG_LEVEL": "INFO",
             },
             log_retention=logs.RetentionDays.TWO_WEEKS,
-            command=["claudestreet.handlers.dlq_replayer.handler"],
         )
 
         # Grant SQS read/delete on DLQ
@@ -346,14 +356,22 @@ class AgentsStack(cdk.Stack):
 
     def _create_stream_processor(
         self,
-        image: lambda_.DockerImageCode,
+        docker_dir: str,
+        docker_file: str,
+        docker_exclude: list[str],
         core: CoreStack,
     ) -> None:
         """Create Lambda triggered by DynamoDB Streams on the trades table."""
+        stream_image = lambda_.DockerImageCode.from_image_asset(
+            directory=docker_dir,
+            file=docker_file,
+            exclude=docker_exclude,
+            cmd=["claudestreet.handlers.stream_processor.handler"],
+        )
         stream_fn = lambda_.DockerImageFunction(
             self, "StreamProcessorFn",
             function_name=f"{self.prefix}-stream-processor",
-            code=image,
+            code=stream_image,
             timeout=Duration.seconds(60),
             memory_size=256,
             role=self.agent_role,
@@ -364,7 +382,6 @@ class AgentsStack(cdk.Stack):
                 "LOG_LEVEL": "INFO",
             },
             log_retention=logs.RetentionDays.TWO_WEEKS,
-            command=["claudestreet.handlers.stream_processor.handler"],
         )
 
         # Trigger from DynamoDB Streams on trades table
@@ -375,7 +392,7 @@ class AgentsStack(cdk.Stack):
             max_batching_window=Duration.seconds(5),
             retry_attempts=3,
             bisect_batch_on_error=True,
-            on_failure=lambda_event_sources.SqsDestination(self.dlq),
+            on_failure=lambda_destinations.SqsDestination(self.dlq),
         ))
 
         self.stream_processor = stream_fn

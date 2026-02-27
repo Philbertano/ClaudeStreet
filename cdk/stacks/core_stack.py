@@ -133,11 +133,11 @@ class CoreStack(cdk.Stack):
 
         # ── Outputs ──
         cdk.CfnOutput(self, "EventBusName", value=self.event_bus.event_bus_name)
-        cdk.CfnOutput(self, "TradesTable", value=self.trades_table.table_name)
-        cdk.CfnOutput(self, "StrategiesTable", value=self.strategies_table.table_name)
-        cdk.CfnOutput(self, "SessionBucket", value=self.session_bucket.bucket_name)
-        cdk.CfnOutput(self, "AttributionsTable", value=self.attributions_table.table_name)
-        cdk.CfnOutput(self, "MarketDataStream", value=self.market_data_stream.stream_name)
+        cdk.CfnOutput(self, "TradesTableOutput", value=self.trades_table.table_name)
+        cdk.CfnOutput(self, "StrategiesTableOutput", value=self.strategies_table.table_name)
+        cdk.CfnOutput(self, "SessionBucketOutput", value=self.session_bucket.bucket_name)
+        cdk.CfnOutput(self, "AttributionsTableOutput", value=self.attributions_table.table_name)
+        cdk.CfnOutput(self, "MarketDataStreamOutput", value=self.market_data_stream.stream_name)
 
     # ── Table factories ──
 
