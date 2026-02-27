@@ -39,7 +39,7 @@ AGENT_SPECS = {
         "heartbeat_minutes": 1,
         "timeout_seconds": 60,
         "memory_mb": 512,
-        "provisioned_concurrency": 1,
+        "provisioned_concurrency": 0,
     },
     "analyst": {
         "handler": "claudestreet.handlers.analyst.handler",
@@ -63,7 +63,7 @@ AGENT_SPECS = {
         "heartbeat_minutes": 2,
         "timeout_seconds": 30,
         "memory_mb": 256,
-        "provisioned_concurrency": 2,
+        "provisioned_concurrency": 0,
     },
     "executor": {
         "handler": "claudestreet.handlers.executor.handler",
@@ -71,7 +71,7 @@ AGENT_SPECS = {
         "heartbeat_minutes": None,
         "timeout_seconds": 30,
         "memory_mb": 256,
-        "provisioned_concurrency": 2,
+        "provisioned_concurrency": 0,
     },
     "chronicler": {
         "handler": "claudestreet.handlers.chronicler.handler",
