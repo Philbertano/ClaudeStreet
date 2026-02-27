@@ -89,18 +89,21 @@ class RiskGuardAgent(BaseAgent):
         try:
             from claudestreet.connectors.broker import BrokerConnector
             broker = BrokerConnector(
-                api_key=self.config.get("alpaca_api_key", ""),
-                secret_key=self.config.get("alpaca_secret_key", ""),
-                base_url=self.config.get("alpaca_base_url", "https://paper-api.alpaca.markets"),
+                api_key=self.config.get("ig_api_key", ""),
+                username=self.config.get("ig_username", ""),
+                password=self.config.get("ig_password", ""),
+                acc_number=self.config.get("ig_acc_number", ""),
+                acc_type=self.config.get("ig_acc_type", "LIVE"),
+                memory=self.memory,
             )
             broker_positions = broker.get_positions()
 
-            internal_by_symbol: dict[str, int] = {}
+            internal_by_symbol: dict[str, float] = {}
             for t in internal_trades:
                 sym = t.get("symbol", "")
                 internal_by_symbol[sym] = internal_by_symbol.get(sym, 0) + t.get("quantity", 0)
 
-            broker_by_symbol: dict[str, int] = {}
+            broker_by_symbol: dict[str, float] = {}
             for p in broker_positions:
                 broker_by_symbol[p["symbol"]] = p["quantity"]
 
@@ -109,7 +112,7 @@ class RiskGuardAgent(BaseAgent):
             for sym in all_symbols:
                 internal_qty = internal_by_symbol.get(sym, 0)
                 broker_qty = broker_by_symbol.get(sym, 0)
-                if internal_qty != broker_qty:
+                if abs(internal_qty - broker_qty) > 0.001:
                     mismatches.append({
                         "symbol": sym,
                         "internal_qty": internal_qty,
@@ -242,7 +245,7 @@ class RiskGuardAgent(BaseAgent):
                 priority=EventPriority.HIGH,
             )]
 
-        logger.info("[risk_guard] APPROVED %s %d %s @ %.2f",
+        logger.info("[risk_guard] APPROVED %s %.2f %s @ %.2f",
                      proposal.side, proposal.quantity, proposal.symbol, proposal.entry_price)
         return [self.emit(
             EventType.RISK_APPROVED,

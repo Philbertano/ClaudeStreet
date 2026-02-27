@@ -49,6 +49,8 @@ _DEFAULTS = {
     "mutation_rate": 0.15,
     "crossover_rate": 0.6,
     "min_trades_for_fitness": 10,
+    "ig_acc_type": "LIVE",
+    "ig_default_currency": "GBP",
 }
 
 

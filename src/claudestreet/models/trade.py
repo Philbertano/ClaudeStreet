@@ -32,7 +32,7 @@ class Order(BaseModel):
     id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
     symbol: str
     side: OrderSide
-    quantity: int
+    quantity: float
     limit_price: float | None = None
     stop_price: float | None = None
     status: OrderStatus = OrderStatus.PENDING
@@ -46,7 +46,7 @@ class Position(BaseModel):
     id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
     symbol: str
     side: OrderSide
-    quantity: int
+    quantity: float
     entry_price: float
     current_price: float = 0.0
     stop_loss: float = 0.0

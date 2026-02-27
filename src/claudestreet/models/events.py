@@ -118,7 +118,7 @@ class SignalPayload(BaseModel):
 class TradeProposalPayload(BaseModel):
     symbol: str
     side: str                 # "buy" or "sell"
-    quantity: int
+    quantity: float
     entry_price: float
     stop_loss: float
     take_profit: float
@@ -131,7 +131,7 @@ class TradeProposalPayload(BaseModel):
 class TradeExecutedPayload(BaseModel):
     symbol: str
     side: str
-    quantity: int
+    quantity: float
     fill_price: float
     order_id: str
     strategy_id: str

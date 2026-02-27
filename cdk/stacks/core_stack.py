@@ -95,9 +95,9 @@ class CoreStack(cdk.Stack):
         self.broker_secret = secretsmanager.Secret(
             self, "BrokerSecret",
             secret_name=f"{prefix}/broker",
-            description="Alpaca broker API credentials",
+            description="IG Markets broker API credentials",
             generate_secret_string=secretsmanager.SecretStringGenerator(
-                secret_string_template='{"alpaca_api_key":"","alpaca_secret_key":"","alpaca_base_url":"https://paper-api.alpaca.markets"}',
+                secret_string_template='{"ig_api_key":"","ig_username":"","ig_password":"","ig_acc_number":"","ig_acc_type":"LIVE"}',
                 generate_string_key="placeholder",
             ),
         )

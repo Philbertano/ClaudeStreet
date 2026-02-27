@@ -92,7 +92,7 @@ class DynamoMemory:
         trade_id: str,
         symbol: str,
         side: str,
-        quantity: int,
+        quantity: float,
         entry_price: float,
         stop_loss: float,
         take_profit: float,
@@ -354,3 +354,44 @@ class DynamoMemory:
         if item:
             return item.get("regime", "")
         return ""
+
+    # ──────────────────────────────────────────────
+    # EPIC cache (symbol → IG EPIC mapping)
+    # ──────────────────────────────────────────────
+
+    def get_epic_cache(self, symbol: str) -> str | None:
+        """Look up cached EPIC for a ticker symbol."""
+        response = self._strategies.get_item(
+            Key={"strategy_id": f"__epic_cache__{symbol}"},
+        )
+        item = response.get("Item")
+        if item:
+            return item.get("epic", None)
+        return None
+
+    def put_epic_cache(self, symbol: str, epic: str) -> None:
+        """Cache a symbol → EPIC mapping."""
+        self._strategies.put_item(
+            Item={
+                "strategy_id": f"__epic_cache__{symbol}",
+                "epic": epic,
+                "symbol": symbol,
+                "is_active": 0,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+    def get_all_epic_cache(self) -> dict[str, str]:
+        """Get all cached symbol → EPIC mappings."""
+        items: list[dict] = []
+        scan_kwargs = {
+            "FilterExpression": Attr("strategy_id").begins_with("__epic_cache__"),
+        }
+        while True:
+            response = self._strategies.scan(**scan_kwargs)
+            items.extend(response.get("Items", []))
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            scan_kwargs["ExclusiveStartKey"] = last_key
+        return {item["symbol"]: item["epic"] for item in items if "symbol" in item and "epic" in item}

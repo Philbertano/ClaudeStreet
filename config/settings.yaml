@@ -72,6 +72,10 @@ llm:
   fast_model: "claude-haiku-4-5-20251001"
 
 # --- Risk limits (circuit breakers) ---
+broker:
+  ig_acc_type: "LIVE"
+  ig_default_currency: "GBP"
+
 risk:
   max_daily_loss_pct: 0.03        # halt trading after 3% daily loss
   max_drawdown_pct: 0.10          # halt after 10% drawdown from peak

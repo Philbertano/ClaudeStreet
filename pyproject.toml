@@ -16,6 +16,7 @@ dependencies = [
     "feedparser>=6.0",
     "python-dotenv>=1.0",
     "tenacity>=8.2",
+    "trading-ig>=0.0.23",
 ]
 
 [project.optional-dependencies]
@@ -29,7 +30,7 @@ cdk = [
     "aws-cdk-lib>=2.120",
     "constructs>=10.0",
 ]
-broker = ["alpaca-trade-api>=3.0"]
+broker = ["trading-ig>=0.0.23"]
 
 [build-system]
 requires = ["hatchling"]

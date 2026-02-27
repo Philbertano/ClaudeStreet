@@ -1,7 +1,7 @@
 """Executor agent — trade execution and order management.
 
 Only acts on RiskGuard-approved proposals. Supports paper
-trading (default) and live Alpaca API execution.
+trading (default) and live IG Markets API execution.
 Tracks order lifecycle via OrderStateMachine.
 """
 
@@ -65,7 +65,7 @@ class ExecutorAgent(BaseAgent):
             "paper": True,
         })
 
-        logger.info("[executor] PAPER %s %d %s @ %.2f",
+        logger.info("[executor] PAPER %s %.2f %s @ %.2f",
                      proposal.side, proposal.quantity, proposal.symbol, proposal.entry_price)
 
         return [self.emit(
@@ -90,9 +90,12 @@ class ExecutorAgent(BaseAgent):
         from claudestreet.connectors.broker import BrokerConnector
 
         broker = BrokerConnector(
-            api_key=self.config.get("alpaca_api_key", ""),
-            secret_key=self.config.get("alpaca_secret_key", ""),
-            base_url=self.config.get("alpaca_base_url", "https://paper-api.alpaca.markets"),
+            api_key=self.config.get("ig_api_key", ""),
+            username=self.config.get("ig_username", ""),
+            password=self.config.get("ig_password", ""),
+            acc_number=self.config.get("ig_acc_number", ""),
+            acc_type=self.config.get("ig_acc_type", "LIVE"),
+            memory=self.memory,
         )
 
         trade_id = f"trade-{uuid.uuid4().hex[:8]}"
@@ -121,7 +124,10 @@ class ExecutorAgent(BaseAgent):
                 symbol=proposal.symbol,
                 side=proposal.side,
                 quantity=proposal.quantity,
-                limit_price=proposal.entry_price,
+                order_type="market",
+                stop_loss=proposal.stop_loss,
+                take_profit=proposal.take_profit,
+                currency_code=self.config.get("ig_default_currency", "GBP"),
             )
 
             if result.get("status") in ("filled", "new", "accepted"):

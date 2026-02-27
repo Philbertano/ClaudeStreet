@@ -438,7 +438,6 @@ class AgentsStack(cdk.Stack):
 
         # Grant Kinesis write access
         core.market_data_stream.grant_write(feeder_task_role)
-        core.broker_secret.grant_read(feeder_task_role)
         core.kms_key.grant_encrypt_decrypt(feeder_task_role)
 
         feeder_task_role.add_to_policy(iam.PolicyStatement(
@@ -464,14 +463,6 @@ class AgentsStack(cdk.Stack):
             environment={
                 "KINESIS_STREAM": core.market_data_stream.stream_name,
                 "LOG_LEVEL": "INFO",
-            },
-            secrets={
-                "ALPACA_API_KEY": ecs.Secret.from_secrets_manager(
-                    core.broker_secret, "alpaca_api_key",
-                ),
-                "ALPACA_SECRET_KEY": ecs.Secret.from_secrets_manager(
-                    core.broker_secret, "alpaca_secret_key",
-                ),
             },
             command=["python", "-m", "claudestreet.connectors.websocket_feeder"],
         )
